@@ -28,48 +28,64 @@ something.
 
 ### Response shape
 
-Two line shapes: **flagged** lines carry extra reasoning fields; **unflagged**
-lines stay lean to keep long-file responses small.
+Two line shapes: **flagged** lines carry extra reasoning fields (`reason`,
+`context`, `raw_features`); **unflagged** lines stay lean to keep long-file
+responses small.
+
+Flagged line (all fields present):
+
+```json
+{
+  "line": 167,
+  "score": 0.99,
+  "flag": true,
+  "axes": {
+    "complexity": 1.0,
+    "tangled_state": 1.0,
+    "hidden_calls": 1.0,
+    "exception_surface": 0.0,
+    "naming": 0.97
+  },
+  "reason": "high on complexity (1.00) + tangled_state (1.00) — deeply nested / branchy control flow; variables reach across long distances",
+  "context": {
+    "function": "per_timestep_attribution",
+    "span": [121, 189],
+    "function_score": 0.99
+  },
+  "raw_features": {
+    "nesting_depth": 1.0, "length": 0.1, "token_entropy": 0.59,
+    "naming_entropy": 0.77, "cyclomatic_proxy": 0.55,
+    "use_def_distance": 1.0, "name_flow": 0.33,
+    "call_graph_shape": 1.0, "exception_density": 0.0
+  }
+}
+```
+
+Unflagged line (lean shape):
+
+```json
+{
+  "line": 168,
+  "score": 0.41,
+  "flag": false,
+  "axes": {
+    "complexity": 0.55,
+    "tangled_state": 0.3,
+    "hidden_calls": 0.1,
+    "exception_surface": 0.0,
+    "naming": 0.62
+  }
+}
+```
+
+Top-level response envelope:
 
 ```json
 {
   "verdict": "3 high-intensity spikes detected — dominant axis: complexity",
   "dominant_axis": "complexity",
   "top_flagged": [167, 166, 165],
-  "lines": [
-    // --- flagged line (all fields present) ---
-    {
-      "line": 167,
-      "score": 0.99,
-      "flag": true,
-      "axes": {
-        "complexity": 1.0,
-        "tangled_state": 1.0,
-        "hidden_calls": 1.0,
-        "exception_surface": 0.0,
-        "naming": 0.97
-      },
-      "reason": "high on complexity (1.00) + tangled_state (1.00) — deeply nested / branchy control flow; variables reach across long distances",
-      "context": {
-        "function": "per_timestep_attribution",
-        "span": [121, 189],
-        "function_score": 0.99
-      },
-      "raw_features": {
-        "nesting_depth": 1.0, "length": 0.1, "token_entropy": 0.59,
-        "naming_entropy": 0.77, "cyclomatic_proxy": 0.55,
-        "use_def_distance": 1.0, "name_flow": 0.33,
-        "call_graph_shape": 1.0, "exception_density": 0.0
-      }
-    },
-    // --- unflagged line (lean shape) ---
-    {
-      "line": 168,
-      "score": 0.41,
-      "flag": false,
-      "axes": { "complexity": 0.55, "tangled_state": 0.3, "...": "..." }
-    }
-  ]
+  "lines": [ /* array of line objects, both shapes as above */ ]
 }
 ```
 
