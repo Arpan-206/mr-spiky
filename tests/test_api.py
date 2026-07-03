@@ -42,3 +42,20 @@ def test_health_reports_supported_languages() -> None:
     body = r.json()
     assert body["status"] == "ok"
     assert "python" in body["supported_languages"]
+
+
+def test_health_reports_mode() -> None:
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] in {"snn", "mock"}
+    assert isinstance(body["threshold"], (int, float))
+    if body["mode"] == "snn":
+        # Real SNN mode should expose diagnostic fields
+        assert isinstance(body["hidden_size"], int) and body["hidden_size"] > 0
+        assert isinstance(body["output_size"], int) and body["output_size"] > 0
+        assert isinstance(body["hidden_baselines_distinct"], int)
+        assert isinstance(body["ecdf_reference_size"], int)
+    else:
+        # Mock mode should say why
+        assert isinstance(body.get("reason"), str) and body["reason"]

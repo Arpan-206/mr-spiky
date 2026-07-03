@@ -28,8 +28,28 @@ something.
 
 - `POST /analyze` — body `{code: string, language: "python"}`. Non-Python
   languages return HTTP 400.
-- `GET /health` — returns `{status: "ok", supported_languages: ["python"]}`.
-  Use to feature-gate the language selector.
+- `GET /health` — returns backend status plus a `mode` flag so the frontend
+  can tell whether the trained SNN is loaded or the server is running in
+  the linear-scoring fallback:
+
+  ```json
+  {
+    "status": "ok",
+    "supported_languages": ["python"],
+    "mode": "snn",
+    "threshold": 0.9,
+    "hidden_size": 128,
+    "output_size": 32,
+    "hidden_baselines_distinct": 17,
+    "ecdf_reference_size": 39942
+  }
+  ```
+
+  When `mode == "mock"` the payload contains `mode`, `threshold`, and a
+  `reason` string explaining why (missing weights file). Use this to show a
+  "running against mock scores — retrain to enable" banner on the frontend
+  instead of silently presenting weaker output. Also handy for the
+  language-selector gate: read `supported_languages` from the same call.
 
 ### Response shape
 

@@ -54,6 +54,38 @@ def _mock_score(vector: list[float]) -> float:
     return max(0.0, min(1.0, s))
 
 
+def describe_mode() -> dict[str, Any]:
+    """Report the current scoring mode without running inference.
+
+    - `mode`: "snn" when trained weights are loaded, "mock" when we're using
+      the fallback linear-scoring path. The frontend can gate demo copy or
+      confidence badges on this.
+    - `threshold`: current flag cutoff (varies by mode).
+    - When in SNN mode we also expose diagnostics from the loaded artifacts.
+    """
+    snn = _load_snn()
+    if snn is None:
+        return {
+            "mode": "mock",
+            "threshold": _MOCK_THRESHOLD,
+            "reason": "models/snn_weights.pt not found; scoring from a linear combination of raw features",
+        }
+    hidden = snn.get("hidden_baseline")
+    output = snn.get("output_baseline")
+    ecdf = snn.get("ecdf_ref")
+    n_distinct_hidden = (
+        len({round(float(v), 4) for v in hidden.tolist()}) if hidden is not None else None
+    )
+    return {
+        "mode": "snn",
+        "threshold": snn["threshold"],
+        "hidden_size": int(hidden.numel()) if hidden is not None else None,
+        "output_size": int(output.numel()) if output is not None else None,
+        "hidden_baselines_distinct": n_distinct_hidden,
+        "ecdf_reference_size": int(ecdf.numel()) if ecdf is not None else None,
+    }
+
+
 def _load_snn() -> dict[str, Any] | None:
     """Lazy-load SNN weights + threshold. Returns None if not yet trained."""
     global _snn_state

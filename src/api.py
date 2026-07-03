@@ -7,7 +7,7 @@ import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from .infer import analyze
+from .infer import analyze, describe_mode
 
 logging.basicConfig(level=logging.INFO)
 
@@ -23,7 +23,11 @@ class AnalyzeRequest(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, object]:
-    return {"status": "ok", "supported_languages": sorted(SUPPORTED_LANGUAGES)}
+    return {
+        "status": "ok",
+        "supported_languages": sorted(SUPPORTED_LANGUAGES),
+        **describe_mode(),
+    }
 
 
 @app.post("/analyze")
