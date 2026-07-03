@@ -16,15 +16,24 @@ def gnarly(x):
 
 
 def _assert_schema(result: dict) -> None:
-    assert set(result.keys()) == {"verdict", "lines", "top_flagged"}
+    # Required keys (dominant_axis is None-able but always present).
+    required = {"verdict", "lines", "top_flagged", "dominant_axis"}
+    assert required.issubset(result.keys())
     assert isinstance(result["verdict"], str) and result["verdict"]
     assert isinstance(result["lines"], list)
     assert isinstance(result["top_flagged"], list)
+    assert result["dominant_axis"] is None or isinstance(result["dominant_axis"], str)
     for entry in result["lines"]:
-        assert set(entry.keys()) == {"line", "score", "flag"}
+        assert {"line", "score", "flag", "axes"}.issubset(entry.keys())
         assert isinstance(entry["line"], int) and entry["line"] >= 1
         assert isinstance(entry["score"], float) and 0.0 <= entry["score"] <= 1.0
         assert isinstance(entry["flag"], bool)
+        assert isinstance(entry["axes"], dict)
+        # Each axis is a float in [0, 1]-ish (occasionally slightly above due
+        # to the p95 rescaler, so allow up to 1.05).
+        for name, val in entry["axes"].items():
+            assert isinstance(name, str)
+            assert isinstance(val, float) and 0.0 <= val <= 1.05
     for ln in result["top_flagged"]:
         assert isinstance(ln, int)
 

@@ -1,15 +1,15 @@
 """Stage 1 — unsupervised STDP pretraining.
 
-Loads the CodeSearchNet Python sample cached by `data/download_codesearchnet.py`,
-extracts function-level features, encodes them as spike trains, and trains
-`SpikyNet` weights with a classical pair-based STDP rule:
+Rate-coded training (the sequence-mode STDP experiment saturated fc2 to zero
+because dense graded-current inputs overpower the multiplicative depression
+rule that was tuned for sparse binary spikes — see the notes in encode.py
+about `encode_sequence`. Inference still uses sequence mode via
+`per_timestep_attribution` in model.py, so lines influence each other at
+inference time even though STDP itself was trained line-independently).
 
-    Δw = +A+ * pre_trace * post_spike      (potentiation on post-fire)
-    Δw = -A- * post_trace * pre_spike      (depression on pre-fire)
-
-Pre/post traces are exponentially decaying counters of recent spikes. There is
-no target signal — the network self-organizes toward the statistics of "normal"
-code, so anomalous code later produces atypical spike patterns.
+STDP rule:
+    Δw⁺ = +A⁺ · pre_trace · post_spike                 (potentiation)
+    Δw⁻ = -A⁻ · post_trace · pre_spike · current_w     (multiplicative depression)
 
 Output: models/snn_weights.pt (state_dict of SpikyNet).
 """
@@ -29,31 +29,35 @@ from .model import SpikyNet
 log = logging.getLogger("mrspiky.train")
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_PATH = ROOT / "data" / "codesearchnet_python.json"
+# The pretraining corpus is what the SNN's STDP defines as "normal." We prefer
+# the curated senior-approved corpus (CPython/Django/FastAPI/etc — code that
+# shipped past reviewers at organizations with strong review culture). If it's
+# not present, fall back to CodeSearchNet (generic scraped Python). This
+# choice matters for the pitch: it's the difference between the SNN encoding
+# "senior engineer intuition" vs "typical GitHub Python."
+_SENIOR_CORPUS = ROOT / "data" / "senior_corpus.json"
+_CSN_CORPUS = ROOT / "data" / "codesearchnet_python.json"
+DATA_PATH = _SENIOR_CORPUS if _SENIOR_CORPUS.exists() else _CSN_CORPUS
 WEIGHTS_PATH = ROOT / "models" / "snn_weights.pt"
 
 # STDP hyperparameters. Depression dominates potentiation and scales with the
 # current weight (multiplicative depression) so weights don't stampede to W_MAX.
-# Empirically this is the standard fix for saturation in additive STDP.
 A_PLUS = 0.005
-A_MINUS = 0.020  # > A_PLUS so competition drives selectivity
-TAU_TRACE = 20.0  # trace decay time-constant (in timesteps)
+A_MINUS = 0.020
+TAU_TRACE = 20.0
 W_MIN = 0.0
 W_MAX = 1.0
-WEIGHT_DECAY = 0.001  # per-batch multiplicative decay toward 0
-EPOCHS = 3
+WEIGHT_DECAY = 0.001
+EPOCHS = 6
 BATCH_SIZE = 16
 
 
 def _stdp_update(
     layer_weight: torch.Tensor,
-    pre_spikes: torch.Tensor,  # (T, B, in)
+    pre_spikes: torch.Tensor,   # (T, B, in) — B is always 1 in sequence mode
     post_spikes: torch.Tensor,  # (T, B, out)
 ) -> None:
-    """Apply pair-based STDP to `layer_weight` in-place.
-
-    layer_weight shape: (out, in) — matches nn.Linear convention.
-    """
+    """Pair-based STDP, in-place. layer_weight shape: (out, in)."""
     T, B, in_dim = pre_spikes.shape
     _, _, out_dim = post_spikes.shape
     decay = float(torch.exp(torch.tensor(-1.0 / TAU_TRACE)))
@@ -66,11 +70,7 @@ def _stdp_update(
         pre_trace = pre_trace * decay + pre_spikes[t]
         post_trace = post_trace * decay + post_spikes[t]
 
-        # Potentiation (additive): post fires now, correlate with recent pre.
-        # (B, out, 1) * (B, 1, in) -> (B, out, in) -> sum over batch
         pot = torch.bmm(post_spikes[t].unsqueeze(2), pre_trace.unsqueeze(1)).sum(0)
-        # Depression (multiplicative): pre fires now, correlate with recent post.
-        # Scaling by current weight prevents saturation at W_MAX.
         dep = torch.bmm(post_trace.unsqueeze(2), pre_spikes[t].unsqueeze(1)).sum(0)
         dw += A_PLUS * pot - A_MINUS * dep * layer_weight
 
@@ -83,18 +83,16 @@ def _stdp_update(
 def _load_functions() -> list[list[float]]:
     if not DATA_PATH.exists():
         log.warning(
-            "no dataset at %s — falling back to a tiny built-in sample. "
-            "run `just data-pretrain` for real training.",
+            "no dataset at %s — falling back to a tiny built-in sample.",
             DATA_PATH,
         )
-        fallback = [
+        sources = [
             "def add(a, b):\n    return a + b\n",
             "def is_even(n):\n    return n % 2 == 0\n",
             "def clamp(x, lo, hi):\n    if x < lo: return lo\n    if x > hi: return hi\n    return x\n",
             "def factorial(n):\n    if n <= 1: return 1\n    return n * factorial(n-1)\n",
-            "def fizzbuzz(n):\n    for i in range(n):\n        if i % 15 == 0: print('fizzbuzz')\n        elif i % 3 == 0: print('fizz')\n        elif i % 5 == 0: print('buzz')\n",
+            "def fizzbuzz(n):\n    for i in range(n):\n        if i % 15 == 0: print('fb')\n        elif i % 3 == 0: print('f')\n        elif i % 5 == 0: print('b')\n",
         ]
-        sources = fallback
     else:
         sources = json.loads(DATA_PATH.read_text())
 
@@ -113,19 +111,15 @@ def train() -> None:
         raise SystemExit("no training vectors — check dataset")
 
     net = SpikyNet()
-    net.eval()  # STDP doesn't use autograd; we mutate weights directly.
+    net.eval()
 
     for epoch in range(EPOCHS):
-        # Shuffle each epoch.
         perm = torch.randperm(len(vectors)).tolist()
         for start in range(0, len(vectors), BATCH_SIZE):
-            batch_idx = perm[start : start + BATCH_SIZE]
-            batch = [vectors[i] for i in batch_idx]
-            spikes_in = encode_batch(batch, num_steps=DEFAULT_STEPS)  # (T, B, F)
-
+            batch = [vectors[i] for i in perm[start : start + BATCH_SIZE]]
+            spikes_in = encode_batch(batch, num_steps=DEFAULT_STEPS)
             with torch.no_grad():
                 out = net(spikes_in)
-
             _stdp_update(net.fc1.weight.data, spikes_in, out.hidden_spikes)
             _stdp_update(net.fc2.weight.data, out.hidden_spikes, out.output_spikes)
 

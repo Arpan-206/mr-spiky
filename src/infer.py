@@ -16,20 +16,30 @@ from typing import Any
 
 import torch
 
-from .encode import DEFAULT_STEPS, encode_batch
-from .features import extract_line_features, normalize
-from .model import SpikyNet, temporal_spike_attribution
+from .encode import DEFAULT_STEPS, encode_batch, encode_sequence
+from .features import (
+    AXIS_NAMES,
+    NUM_FEATURES,
+    compute_axes,
+    extract_line_features,
+    normalize,
+)
+from .model import SpikyNet, ecdf_rescale, per_timestep_attribution, temporal_spike_attribution
 
 log = logging.getLogger("mrspiky.infer")
 
 _MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 _WEIGHTS_PATH = _MODELS_DIR / "snn_weights.pt"
+_BASELINES_PATH = _MODELS_DIR / "snn_baselines.pt"
+_ECDF_PATH = _MODELS_DIR / "snn_ecdf.pt"
 _THRESHOLD_PATH = _MODELS_DIR / "threshold.json"
 
-# Weights used to collapse normalized features into a single suspicion score in
-# mock mode. Hand-picked: nesting depth + cyclomatic complexity dominate,
-# length contributes a bit, entropy features act as tie-breakers.
-_MOCK_WEIGHTS: tuple[float, ...] = (0.40, 0.15, 0.10, 0.10, 0.25)
+# Weights used to collapse normalized features into a single suspicion score
+# in mock mode. Hand-picked, ordered to match FEATURE_NAMES in features.py.
+# nesting_depth + cyclomatic_proxy dominate; the new (use_def, call_graph)
+# dims get moderate weight; length + exception_density are near-noise.
+_MOCK_WEIGHTS: tuple[float, ...] = (0.30, 0.05, 0.05, 0.05, 0.20, 0.10, 0.10, 0.10, 0.05)
+assert len(_MOCK_WEIGHTS) == NUM_FEATURES, "mock weights out of sync with features"
 _MOCK_THRESHOLD = 0.55
 
 # Populated lazily on first call if weights exist.
@@ -56,7 +66,28 @@ def _load_snn() -> dict[str, Any] | None:
         threshold = _MOCK_THRESHOLD
         if _THRESHOLD_PATH.exists():
             threshold = float(json.loads(_THRESHOLD_PATH.read_text())["threshold"])
-        _snn_state = {"net": net, "threshold": threshold}
+        hidden_baseline = None
+        output_baseline = None
+        if _BASELINES_PATH.exists():
+            b = torch.load(_BASELINES_PATH, weights_only=True)
+            hidden_baseline = b["hidden"]
+            output_baseline = b["output"]
+            log.info(
+                "loaded baselines: hidden mean=%.3f  output mean=%.3f",
+                float(hidden_baseline.mean()), float(output_baseline.mean()),
+            )
+        ecdf_ref = None
+        if _ECDF_PATH.exists():
+            e = torch.load(_ECDF_PATH, weights_only=True)
+            ecdf_ref = e["sorted_raw_scores"]
+            log.info("loaded ECDF reference (n=%d)", int(ecdf_ref.numel()))
+        _snn_state = {
+            "net": net,
+            "threshold": threshold,
+            "hidden_baseline": hidden_baseline,
+            "output_baseline": output_baseline,
+            "ecdf_ref": ecdf_ref,
+        }
         log.info("loaded SNN weights + threshold=%.4f", threshold)
         return _snn_state
     except Exception as e:  # noqa: BLE001 — hackathon: don't crash the API
@@ -64,23 +95,84 @@ def _load_snn() -> dict[str, Any] | None:
         return None
 
 
-def _snn_scores(net: SpikyNet, vectors: list[list[float]]) -> list[float]:
-    """Run all line vectors through the SNN in one batch, return TSA per line."""
+def _snn_scores_isolated(net: SpikyNet, vectors: list[list[float]]) -> list[float]:
+    """Line-independent rate-coded scoring. Each line rate-coded into 25
+    steps, no membrane state shared between lines."""
     if not vectors:
         return []
     spikes = encode_batch(vectors, num_steps=DEFAULT_STEPS)
     with torch.no_grad():
         out = net(spikes)
-    intensities = temporal_spike_attribution(out.hidden_spikes)  # (B,) already in ~[0,1]
+    intensities = temporal_spike_attribution(out.hidden_spikes)
     return [max(0.0, min(1.0, float(v))) for v in intensities.tolist()]
 
 
-def _verdict(flagged_count: int) -> str:
+def _snn_scores_sequence(
+    net: SpikyNet,
+    vectors: list[list[float]],
+    hidden_baseline: torch.Tensor | None = None,
+    output_baseline: torch.Tensor | None = None,
+) -> list[float]:
+    """Sequence-mode scoring with baseline-relative attribution.
+
+    Feed line vectors as a temporal stream so each line's LIF membrane state
+    carries forward. Per-line score = how much the SNN's firing *exceeds*
+    its usual per-neuron firing rate on senior code. High score = 'this line
+    lights up neurons that are usually quiet' — the SNN's version of a
+    reviewer's gut reaction."""
+    if not vectors:
+        return []
+    seq = encode_sequence(vectors)  # (T=lines, B=1, F)
+    with torch.no_grad():
+        out = net(seq)
+    per_line = per_timestep_attribution(
+        out.hidden_spikes, out.output_spikes,
+        hidden_baseline=hidden_baseline,
+        output_baseline=output_baseline,
+        hidden_mem=out.hidden_mem,
+        output_mem=out.output_mem,
+    ).squeeze(1)
+    return [max(0.0, min(1.0, float(v))) for v in per_line.tolist()]
+
+
+# Toggle for the pitch: set to False to see per-line-isolated scoring.
+_USE_SEQUENCE_MODE = True
+
+
+def _snn_scores(
+    net: SpikyNet,
+    vectors: list[list[float]],
+    hidden_baseline: torch.Tensor | None = None,
+    output_baseline: torch.Tensor | None = None,
+) -> list[float]:
+    if _USE_SEQUENCE_MODE:
+        return _snn_scores_sequence(net, vectors, hidden_baseline, output_baseline)
+    return _snn_scores_isolated(net, vectors)
+
+
+def _verdict(flagged_count: int, dominant_axis: str | None) -> str:
     if flagged_count == 0:
         return "no suspicious spikes detected"
-    if flagged_count == 1:
-        return "1 high-intensity spike detected"
-    return f"{flagged_count} high-intensity spikes detected"
+    base = (
+        "1 high-intensity spike detected"
+        if flagged_count == 1
+        else f"{flagged_count} high-intensity spikes detected"
+    )
+    if dominant_axis:
+        return f"{base} — dominant axis: {dominant_axis}"
+    return base
+
+
+def _dominant_axis(axes_per_flagged_line: list[dict[str, float]]) -> str | None:
+    """Across flagged lines, which axis has the highest mean value? That's what
+    the SNN is 'objecting to' most across this snippet."""
+    if not axes_per_flagged_line:
+        return None
+    means: dict[str, float] = {name: 0.0 for name in AXIS_NAMES}
+    for a in axes_per_flagged_line:
+        for name in AXIS_NAMES:
+            means[name] += a.get(name, 0.0)
+    return max(means, key=means.get)
 
 
 def analyze(code: str) -> dict[str, Any]:
@@ -94,11 +186,30 @@ def analyze(code: str) -> dict[str, Any]:
         scores = [(lf.line, _mock_score(lf.vector)) for lf in line_feats]
     else:
         threshold = snn["threshold"]
-        raw = _snn_scores(snn["net"], [lf.vector for lf in line_feats])
+        raw = _snn_scores(
+            snn["net"],
+            [lf.vector for lf in line_feats],
+            hidden_baseline=snn["hidden_baseline"],
+            output_baseline=snn["output_baseline"],
+        )
+        # ECDF rescale so raw scores (which collapse to a few discrete values
+        # from LIF spike quantization) become percentile ranks vs the senior
+        # corpus. Now the threshold in [0,1] means "top-(1-thr)% of senior code."
+        if snn["ecdf_ref"] is not None:
+            raw = ecdf_rescale(raw, snn["ecdf_ref"])
         scores = list(zip((lf.line for lf in line_feats), raw))
 
+    # Per-line axes: computed from the same normalized feature vector the SNN
+    # consumed, so the axes explain *what the SNN saw*, not a parallel channel.
+    axes_by_line = {lf.line: compute_axes(normalize(lf.vector)) for lf in line_feats}
+
     lines_out = [
-        {"line": ln, "score": round(sc, 4), "flag": sc >= threshold}
+        {
+            "line": ln,
+            "score": round(sc, 4),
+            "flag": sc >= threshold,
+            "axes": axes_by_line.get(ln, {}),
+        }
         for ln, sc in scores
     ]
     flagged = [ln for ln, sc in scores if sc >= threshold]
@@ -109,9 +220,11 @@ def analyze(code: str) -> dict[str, Any]:
             reverse=True,
         )[:10]
     ]
+    dom = _dominant_axis([axes_by_line[ln] for ln in flagged if ln in axes_by_line])
 
     return {
-        "verdict": _verdict(len(flagged)),
+        "verdict": _verdict(len(flagged), dom),
+        "dominant_axis": dom,
         "lines": lines_out,
         "top_flagged": top_flagged,
     }

@@ -25,17 +25,23 @@ from pathlib import Path
 
 import torch
 
-from .encode import DEFAULT_STEPS, encode_batch
+from .encode import DEFAULT_STEPS, encode_batch, encode_sequence
 from .features import extract_function_features, extract_line_features
-from .model import SpikyNet, temporal_spike_attribution
+from .model import SpikyNet, ecdf_rescale, per_timestep_attribution, temporal_spike_attribution
 
 log = logging.getLogger("mrspiky.calibrate")
 
 ROOT = Path(__file__).resolve().parent.parent
-PRETRAIN_PATH = ROOT / "data" / "codesearchnet_python.json"
+_SENIOR_CORPUS = ROOT / "data" / "senior_corpus.json"
+_CSN_CORPUS = ROOT / "data" / "codesearchnet_python.json"
+# "Normal" for calibration = the same corpus used for STDP pretraining.
+PRETRAIN_PATH = _SENIOR_CORPUS if _SENIOR_CORPUS.exists() else _CSN_CORPUS
 LABELED_PATH = ROOT / "data" / "mlcq_labeled.json"  # PyResBugs-populated
 CODECOMPLEX_PATH = ROOT / "data" / "codecomplex_labeled.json"
+ANNOTATIONS_PATH = ROOT / "data" / "annotations_labeled.json"
 WEIGHTS_PATH = ROOT / "models" / "snn_weights.pt"
+BASELINES_PATH = ROOT / "models" / "snn_baselines.pt"
+ECDF_PATH = ROOT / "models" / "snn_ecdf.pt"
 THRESHOLD_PATH = ROOT / "models" / "threshold.json"
 
 # Anomaly cutoff = mean + K*std of TSA over the "normal" corpus.
@@ -98,29 +104,76 @@ def _load_pretrain_sources() -> list[str]:
     return []
 
 
-def _intensity(net: SpikyNet, code: str) -> float:
-    fns = extract_function_features(code)
-    if not fns:
-        return 0.0
-    spikes = encode_batch([f.vector for f in fns], num_steps=DEFAULT_STEPS)
-    with torch.no_grad():
-        out = net(spikes)
-    return float(temporal_spike_attribution(out.hidden_spikes).max().item())
-
-
-def _batch_intensities(net: SpikyNet, sources: list[str]) -> list[float]:
-    """Line-level intensities — matches the granularity of infer.py so the
-    calibrated threshold applies directly at inference time."""
-    vectors: list[list[float]] = []
-    for src in sources:
-        for lf in extract_line_features(src):
-            vectors.append(lf.vector)
-    if not vectors:
+def _sequence_line_intensities(
+    net: SpikyNet,
+    src: str,
+    hidden_baseline: torch.Tensor | None = None,
+    output_baseline: torch.Tensor | None = None,
+) -> list[float]:
+    """Run one source through the SNN in *sequence mode*, return one score
+    per line. Uses the same code path as infer.py so calibration and inference
+    live on the same scale."""
+    line_feats = extract_line_features(src)
+    if not line_feats:
         return []
-    spikes = encode_batch(vectors, num_steps=DEFAULT_STEPS)
+    seq = encode_sequence([lf.vector for lf in line_feats])
     with torch.no_grad():
-        out = net(spikes)
-    return [float(v) for v in temporal_spike_attribution(out.hidden_spikes).tolist()]
+        out = net(seq)
+    per_line = per_timestep_attribution(
+        out.hidden_spikes, out.output_spikes,
+        hidden_baseline=hidden_baseline,
+        output_baseline=output_baseline,
+        hidden_mem=out.hidden_mem,
+        output_mem=out.output_mem,
+    ).squeeze(1)
+    return [float(v) for v in per_line.tolist()]
+
+
+def _compute_baselines(net: SpikyNet, sources: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Mean per-neuron firing rate across the corpus. Returns (hidden, output)
+    both shape (H,) / (O,), values in [0, 1]."""
+    h_sums: torch.Tensor | None = None
+    o_sums: torch.Tensor | None = None
+    total_steps = 0
+    for src in sources:
+        line_feats = extract_line_features(src)
+        if not line_feats:
+            continue
+        seq = encode_sequence([lf.vector for lf in line_feats])
+        with torch.no_grad():
+            out = net(seq)
+        # out.hidden_spikes: (T, 1, H). Sum over T; accumulate per-neuron.
+        h = out.hidden_spikes.squeeze(1).sum(dim=0)  # (H,)
+        o = out.output_spikes.squeeze(1).sum(dim=0)  # (O,)
+        h_sums = h if h_sums is None else h_sums + h
+        o_sums = o if o_sums is None else o_sums + o
+        total_steps += out.hidden_spikes.shape[0]
+    if total_steps == 0 or h_sums is None or o_sums is None:
+        raise RuntimeError("no baseline data — check corpus")
+    return h_sums / total_steps, o_sums / total_steps
+
+
+def _intensity(
+    net: SpikyNet,
+    code: str,
+    hidden_baseline: torch.Tensor | None = None,
+    output_baseline: torch.Tensor | None = None,
+) -> float:
+    """Max per-line sequence-mode intensity for a snippet."""
+    scores = _sequence_line_intensities(net, code, hidden_baseline, output_baseline)
+    return max(scores) if scores else 0.0
+
+
+def _batch_intensities(
+    net: SpikyNet,
+    sources: list[str],
+    hidden_baseline: torch.Tensor | None = None,
+    output_baseline: torch.Tensor | None = None,
+) -> list[float]:
+    out: list[float] = []
+    for src in sources:
+        out.extend(_sequence_line_intensities(net, src, hidden_baseline, output_baseline))
+    return out
 
 
 def _pick_threshold(scored: list[tuple[float, int]]) -> float:
@@ -168,29 +221,64 @@ def calibrate() -> None:
     net.load_state_dict(torch.load(WEIGHTS_PATH, weights_only=True))
     net.eval()
 
-    # ---- Primary path: anomaly threshold from CodeSearchNet ----
+    # ---- Compute per-neuron baselines from the "normal" corpus ----
+    # This is what turns the SNN into an intuition model: instead of scoring
+    # raw firing (which saturates on typical senior-approved code because
+    # senior code is genuinely complex), we score how much each line's firing
+    # *exceeds* the neuron's usual firing rate on the training corpus. High
+    # score means "this line lights up neurons that are usually quiet on
+    # senior code" — the SNN's version of a reviewer's "wait, that's odd."
     pretrain_sources = _load_pretrain_sources()
-    normal_intensities = _batch_intensities(net, pretrain_sources)
+    log.info("computing per-neuron baselines over %d sources…", len(pretrain_sources))
+    hidden_baseline, output_baseline = _compute_baselines(net, pretrain_sources)
+    log.info(
+        "baselines: hidden mean=%.3f  min=%.3f max=%.3f  |  output mean=%.3f min=%.3f max=%.3f",
+        float(hidden_baseline.mean()), float(hidden_baseline.min()), float(hidden_baseline.max()),
+        float(output_baseline.mean()), float(output_baseline.min()), float(output_baseline.max()),
+    )
+    BASELINES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"hidden": hidden_baseline, "output": output_baseline}, BASELINES_PATH)
+    log.info("saved baselines -> %s", BASELINES_PATH)
+
+    # ---- Primary path: anomaly threshold, now scored against baselines ----
+    normal_intensities = _batch_intensities(net, pretrain_sources, hidden_baseline, output_baseline)
     result: dict = {}
+
+    # ---- ECDF calibration ----
+    # The raw SNN scores collapse to a few discrete values (e.g. {0.0, 0.4,
+    # 0.5, 0.9, 1.0}) because sequence-mode LIF spikes are quantized. That
+    # made the threshold saturate. Fix: save the *sorted* corpus scores and
+    # at inference remap each raw score to its percentile in this
+    # distribution — so a line at corpus median becomes 0.5, top 1% becomes
+    # 0.99, etc. This spreads the score distribution across [0,1] and turns
+    # the threshold from "did you saturate" into "top-X% relative to senior
+    # code," which is what the pitch actually claims.
+    if normal_intensities:
+        sorted_scores = sorted(normal_intensities)
+        ecdf_tensor = torch.tensor(sorted_scores, dtype=torch.float32)
+        torch.save({"sorted_raw_scores": ecdf_tensor}, ECDF_PATH)
+        log.info("saved ECDF (%d samples) -> %s", len(sorted_scores), ECDF_PATH)
 
     if normal_intensities:
         s = _stats(normal_intensities)
-        threshold = s["mean"] + ANOMALY_K * s["std"]
-        threshold = max(0.0, min(1.0, threshold))
+        t = torch.tensor(normal_intensities)
+        # After ECDF rescale, the primary threshold in ECDF-space is just
+        # the percentile cutoff. p90 = "top 10% most unusual for senior code."
+        threshold = 0.90
         log.info(
-            "anomaly threshold %.4f = mean(%.4f) + %.1f * std(%.4f)  over n=%d",
-            threshold, s["mean"], ANOMALY_K, s["std"], s["n"],
+            "anomaly threshold %.4f = p90 baseline-relative over n=%d  (mean=%.4f std=%.4f p95=%.4f)",
+            threshold, s["n"], s["mean"], s["std"], s["p95"],
         )
         result = {
             "threshold": threshold,
             "n_samples": s["n"],
-            "method": f"anomaly: mean + {ANOMALY_K}*std over CodeSearchNet",
+            "method": "anomaly: p90 of baseline-relative TSA over senior corpus (sequence-SNN)",
             "normal_stats": s,
         }
     else:
         log.warning("no pretraining stats available — falling back to labeled accuracy sweep")
         labeled = _load_labeled()
-        scored = [(_intensity(net, i["code"]), int(i["label"])) for i in labeled]
+        scored = [(_intensity(net, i["code"], hidden_baseline, output_baseline), int(i["label"])) for i in labeled]
         threshold = _pick_threshold(scored)
         result = {
             "threshold": threshold,
@@ -198,12 +286,22 @@ def calibrate() -> None:
             "method": "labeled accuracy sweep (fallback)",
         }
 
+    ecdf_ref = torch.tensor(sorted(normal_intensities), dtype=torch.float32) if normal_intensities else None
+
+    def _intensity_ecdf(code: str) -> float:
+        raw_scores = _sequence_line_intensities(net, code, hidden_baseline, output_baseline)
+        if not raw_scores:
+            return 0.0
+        if ecdf_ref is not None:
+            raw_scores = ecdf_rescale(raw_scores, ecdf_ref)
+        return max(raw_scores)
+
     def _labeled_block(path: Path, name: str) -> dict | None:
         if not path.exists():
             return None
         labeled = json.loads(path.read_text())
-        pos = [_intensity(net, i["code"]) for i in labeled if int(i["label"]) == 1]
-        neg = [_intensity(net, i["code"]) for i in labeled if int(i["label"]) == 0]
+        pos = [_intensity_ecdf(i["code"]) for i in labeled if int(i["label"]) == 1]
+        neg = [_intensity_ecdf(i["code"]) for i in labeled if int(i["label"]) == 0]
 
         thr_primary = result["threshold"]
         flag_pos = sum(1 for x in pos if x >= thr_primary) / max(len(pos), 1)
@@ -251,6 +349,13 @@ def calibrate() -> None:
     codecomplex_block = _labeled_block(CODECOMPLEX_PATH, "CodeComplex (complexity)")
     if codecomplex_block:
         result["codecomplex_stats"] = codecomplex_block
+
+    # Annotations (real senior judgments: # noqa, # type: ignore, etc.)
+    # — this is THE pitch validation: does the SNN's per-line score rise on
+    # lines that senior devs themselves flagged as exceptions?
+    annotations_block = _labeled_block(ANNOTATIONS_PATH, "Annotations (senior judgments)")
+    if annotations_block:
+        result["annotations_stats"] = annotations_block
 
     THRESHOLD_PATH.parent.mkdir(parents=True, exist_ok=True)
     THRESHOLD_PATH.write_text(json.dumps(result, indent=2))

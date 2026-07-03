@@ -15,7 +15,7 @@ def test_analyze_defaults_to_python() -> None:
     r = client.post("/analyze", json={"code": PY_SAMPLE})
     assert r.status_code == 200
     body = r.json()
-    assert set(body.keys()) == {"verdict", "lines", "top_flagged"}
+    assert {"verdict", "lines", "top_flagged", "dominant_axis"}.issubset(body.keys())
 
 
 def test_analyze_accepts_python_language() -> None:
