@@ -13,8 +13,10 @@ neurons which are usually quiet on senior-approved code.
 
 Feature vectors are ZCA-whitened against the training corpus before entering
 the SNN so its 128 hidden neurons see 9 orthogonal input dimensions instead of
-~4 tangled ones — that fix alone increased neuron specialization from 2
-clusters to 14 and lifted CodeComplex accuracy from 58% to 70%.
+~4 tangled ones — that fix alone broke the SNN out of a 2-cluster collapse
+(neurons converged to only 2 distinct baseline firing rates) into typically
+10–17 distinct baselines, and lifted CodeComplex balanced accuracy from 58%
+to 70%.
 
 ## What it does
 
@@ -124,7 +126,7 @@ one of the two shapes above):
 | `top_flagged` | list<int> | Line numbers, worst first. Perfect for a "jump to next hot line" button or a table of contents. |
 | `lines[i].line` | int (1-based) | Match to your source line numbering. |
 | `lines[i].score` | float ∈ [0,1] | The main scalar. Interpret as *percentile rank against senior code*: `0.9` = "top 10% most unusual line vs Django/CPython/etc." Great for background-color intensity. |
-| `lines[i].flag` | bool | Whether `score ≥ threshold` (default 0.9). Use for the gutter marker / underline. |
+| `lines[i].flag` | bool | Whether `score ≥ threshold`. Read the exact threshold from `/health` (0.9 in SNN mode, 0.55 in mock mode). Use for the gutter marker / underline. |
 | `lines[i].axes` | dict<string, float> | Five axes, each ∈ [0,1] roughly (may briefly exceed 1.0 by ~5%). Radar chart or horizontal-bar breakdown per line. See the axis glossary below. |
 | `lines[i].reason` | string *(flagged only)* | Ready-to-display tooltip / hover text. Reads like reviewer feedback. |
 | `lines[i].context` | object *(flagged only)* | `{function, span: [start, end], function_score}`. `function_score` is the SNN's score for the *enclosing function as a whole* — useful to show "this line is inside a function that's also gnarly," or to fold flagged lines by function. |
@@ -158,7 +160,7 @@ went into the SNN. Same feature can contribute to multiple axes.
 - Blank input → `{verdict: "no suspicious spikes detected", lines: [], top_flagged: [], dominant_axis: null}`. Render a neutral "nothing to analyze" state.
 - Python syntax error → same shape, empty `lines`. **Don't** show an error banner — the tool just returned nothing to flag. Show your own parser feedback if you have one.
 - Non-Python language → HTTP 400 with `detail: "language 'X' not supported. Mr. Spiky's AST features are Python-only. Supported: ['python']"`. Surface as an error toast; disable the analyze button until the user switches back to Python.
-- Mock mode (no trained weights on the backend) → same schema, scores derived from a linear combination of raw features. **The response body doesn't announce mock mode** — the server logs a warning. If you need to know, hit `/health` first; it's the same in both modes but the response time is faster (~10ms vs ~200ms) in mock mode.
+- Mock mode (no trained weights on the backend) → same `/analyze` response schema, scores derived from a linear combination of raw features. Detect it by checking `mode` in the `/health` response (`"snn"` vs `"mock"`) — the mock payload also carries a `reason` string you can surface directly. In mock mode the flag threshold is 0.55 (not 0.9) and the axes are the same but reflect only what the AST-feature linear scoring saw.
 
 ## Architecture
 
@@ -174,7 +176,9 @@ features. Raw features are heavily correlated on real Python (e.g. `length` ↔
 `token_entropy` at r=0.84, `cyclomatic_proxy` ↔ `call_graph_shape` at r=0.92),
 so without whitening the SNN saw only ~4 truly independent dimensions and
 collapsed 128 neurons into 2 clusters. With whitening the same corpus
-produces 14 distinct neuron baselines — real specialization.
+produces 10–17 distinct neuron baselines per training run — real
+specialization. Live count exposed as `hidden_baselines_distinct` in
+`/health`.
 
 **3. Calibrate** — feed the training corpus through the trained SNN in
 sequence mode (each line = one timestep, membranes carry across lines) and
@@ -208,9 +212,10 @@ see semantic bugs, and the tool honestly reports that. What the SNN *does*
 catch is what it claims — the tangled, deeply-nested, high-delegation lines
 that seniors would circle in review.
 
-Trained SNN state currently produces **14 distinct per-neuron baselines**
-across the 128 hidden units (std = 0.134), meaning neurons genuinely
-specialized rather than collapsing to a single mode.
+STDP training is stochastic, so the trained SNN produces **10–17 distinct
+per-neuron baselines** across the 128 hidden units on repeated runs — the
+important thing is that it stably clears the ~2-cluster degenerate case that
+un-whitened training got stuck in. Live diagnostics available at `/health`.
 
 ## Setup
 
@@ -226,7 +231,7 @@ uv sync
 ```bash
 just api            # FastAPI on :8000 (mock mode until weights are trained)
 just smoke          # POST a sample snippet to the running API
-just test           # pytest — 8 tests
+just test           # pytest — 9 tests
 
 just data-pretrain  # download senior corpus (~30s, 149 files, ~2MB)
 just data-calib     # download PyResBugs + CodeComplex + mine annotations
@@ -245,9 +250,12 @@ AST features are Python-only).
 
 Until `models/snn_weights.pt` exists, `infer.py` falls back to scoring lines
 directly from normalized AST features via a hand-picked linear combination.
-The API stays up and returns the same JSON schema — a warning is logged on
-each request so it's obvious you're not running the trained SNN yet. This
-lets a frontend integrate against a live API before training completes.
+The API stays up and returns the same `/analyze` schema (same fields, same
+axes, same reason strings on flagged lines), and `/health` reports
+`mode: "mock"` plus a `reason` field so the frontend can render a banner or
+disable confidence badges. A warning is also logged server-side on each
+request. This lets a frontend integrate against a live API before training
+completes.
 
 ## Why an SNN?
 
