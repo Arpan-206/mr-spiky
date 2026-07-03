@@ -78,14 +78,15 @@ Unflagged line (lean shape):
 }
 ```
 
-Top-level response envelope:
+Top-level response envelope (fields wrap the `lines` array; each entry follows
+one of the two shapes above):
 
 ```json
 {
   "verdict": "3 high-intensity spikes detected — dominant axis: complexity",
   "dominant_axis": "complexity",
   "top_flagged": [167, 166, 165],
-  "lines": [ /* array of line objects, both shapes as above */ ]
+  "lines": []
 }
 ```
 
