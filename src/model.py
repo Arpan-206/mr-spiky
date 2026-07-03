@@ -20,11 +20,11 @@ from snntorch import Leaky
 
 from .features import NUM_FEATURES
 
-HIDDEN = 64   # bumped from 16 — with 64 neurons, mean-of-firing has enough
-              # granularity to produce continuous-looking scores. With 16
-              # neurons the mean collapses to ~5 discrete values which
-              # saturated the ECDF calibration on real code.
-OUTPUT = 16   # bumped 4 -> 16 for the same reason
+HIDDEN = 128  # bumped 16 → 64 → 128. Bigger hidden layer gives STDP more
+              # neurons to specialize, so different neurons can learn different
+              # 'flavors of taste' — makes the multi-axis output more selective
+              # and provides more distinct firing patterns for context.
+OUTPUT = 32   # bumped 4 → 16 → 32 for the same reason
 BETA = 0.9    # membrane decay
 LIF1_THRESHOLD = 1.0
 LIF2_THRESHOLD = 1.0

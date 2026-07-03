@@ -22,8 +22,8 @@ from pathlib import Path
 
 import torch
 
-from .encode import DEFAULT_STEPS, encode_batch
-from .features import extract_function_features
+from .encode import DEFAULT_STEPS, encode_batch, fit_whitening
+from .features import extract_function_features, extract_line_features
 from .model import SpikyNet
 
 log = logging.getLogger("mrspiky.train")
@@ -39,6 +39,7 @@ _SENIOR_CORPUS = ROOT / "data" / "senior_corpus.json"
 _CSN_CORPUS = ROOT / "data" / "codesearchnet_python.json"
 DATA_PATH = _SENIOR_CORPUS if _SENIOR_CORPUS.exists() else _CSN_CORPUS
 WEIGHTS_PATH = ROOT / "models" / "snn_weights.pt"
+WHITENING_PATH = ROOT / "models" / "whitening.pt"
 
 # STDP hyperparameters. Depression dominates potentiation and scales with the
 # current weight (multiplicative depression) so weights don't stampede to W_MAX.
@@ -104,8 +105,39 @@ def _load_functions() -> list[list[float]]:
     return vectors
 
 
+def _fit_and_save_whitening() -> None:
+    """Fit the whitening transform from the pretraining corpus (per-LINE
+    vectors, since inference operates line-by-line) and save it. Called
+    before STDP so the training loop already benefits from decorrelated
+    inputs on the very first epoch."""
+    if not DATA_PATH.exists():
+        log.info("no corpus available to fit whitening; skipping (will use raw normalize)")
+        return
+    sources = json.loads(DATA_PATH.read_text())
+    line_vectors: list[list[float]] = []
+    for src in sources:
+        for lf in extract_line_features(src):
+            line_vectors.append(lf.vector)
+    if len(line_vectors) < 100:
+        log.info("only %d line vectors — too few to fit whitening", len(line_vectors))
+        return
+    WHITENING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if WHITENING_PATH.exists():
+        WHITENING_PATH.unlink()  # ensure fresh fit; encode.py caches on load
+    transform = fit_whitening(line_vectors)
+    torch.save(transform, WHITENING_PATH)
+    log.info("fit whitening over %d line vectors -> %s", len(line_vectors), WHITENING_PATH)
+    # Reset encode.py's whitening cache so subsequent encode_batch calls
+    # pick up the just-saved transform.
+    from . import encode as _encode
+    _encode._whitening_cache = None
+
+
 def train() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    _fit_and_save_whitening()
+
     vectors = _load_functions()
     if not vectors:
         raise SystemExit("no training vectors — check dataset")

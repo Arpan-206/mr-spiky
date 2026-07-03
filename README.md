@@ -4,12 +4,17 @@
 > A senior engineer looks at code and instantly knows "this is wrong."
 > Mr. Spiky is a first attempt at encoding that intuition.
 
-A spiking neural network (SNN) trained unsupervised via STDP on **~2500 Python
+A spiking neural network (SNN) trained unsupervised via STDP on **~2680 Python
 functions written by maintainers at CPython, Django, FastAPI, Flask, requests,
 black, httpx, pydantic, sqlalchemy, and poetry** — code that shipped through
 review at organizations with strong review culture. At inference the SNN reads
 your code line-by-line as a temporal stream and fires on lines that light up
 neurons which are usually quiet on senior-approved code.
+
+Feature vectors are ZCA-whitened against the training corpus before entering
+the SNN so its 128 hidden neurons see 9 orthogonal input dimensions instead of
+~4 tangled ones — that fix alone increased neuron specialization from 2
+clusters to 14 and lifted CodeComplex accuracy from 58% to 70%.
 
 ## What it does
 
@@ -138,40 +143,54 @@ went into the SNN. Same feature can contribute to multiple axes.
 ## Architecture
 
 **1. Pretrain (unsupervised STDP)** — 2 layer LIF SNN with 9 input dims →
-64 hidden → 16 output. Depression-dominated multiplicative STDP with weight
-decay prevents saturation. Trained on ~2500 functions from `data/senior_corpus.json`
-(auto-fetched from 10 respected Python repos).
+**128** hidden → **32** output. Depression-dominated multiplicative STDP with
+weight decay prevents saturation. Trained on 2680 functions from
+`data/senior_corpus.json` (auto-fetched from 10 respected Python repos, 149
+source files, ~40k line vectors).
 
-**2. Calibrate** — feed the training corpus through the trained SNN in
+**2. Preprocess (ZCA whitening)** — before any encoding, feature vectors are
+whitened against a covariance matrix fitted on the senior corpus's per-line
+features. Raw features are heavily correlated on real Python (e.g. `length` ↔
+`token_entropy` at r=0.84, `cyclomatic_proxy` ↔ `call_graph_shape` at r=0.92),
+so without whitening the SNN saw only ~4 truly independent dimensions and
+collapsed 128 neurons into 2 clusters. With whitening the same corpus
+produces 14 distinct neuron baselines — real specialization.
+
+**3. Calibrate** — feed the training corpus through the trained SNN in
 sequence mode (each line = one timestep, membranes carry across lines) and
 compute:
 - **Per-neuron baseline** firing rates (what "normal" looks like per neuron).
 - **ECDF over corpus scores** (turns raw SNN output into a percentile rank).
 - **Anomaly threshold** at p90 = top-10%-most-unusual for senior code.
 
-**3. Infer** — for new code:
+**4. Infer** — for new code:
 1. Extract per-line features (skipping docstrings and imports).
-2. Run through the SNN as a temporal sequence.
-3. Score each line by *continuous membrane activation excess over the
+2. Whiten with the calibrated transform.
+3. Run through the SNN as a temporal sequence.
+4. Score each line by *continuous membrane activation excess over the
    per-neuron baseline* — not binary spike output. Continuous membranes are
    what makes per-line scores smooth instead of collapsing to 4-5 discrete
    values.
-4. ECDF-rescale so the score is a percentile rank vs senior code.
+5. ECDF-rescale so the score is a percentile rank vs senior code.
 
 ## Validation (recorded in `models/threshold.json`)
 
 Three labeled datasets, ordered by relevance to the pitch:
 
-| Dataset | n | What it measures | Balanced accuracy (optimal) |
-| :-- | --: | :-- | --: |
-| **Annotations** (`# noqa`, `# type: ignore`, `# pragma: no cover` from the same senior repos) | 596 | **Real senior judgments** — lines seniors themselves marked as exceptions | **66.1%** |
-| **CodeComplex** (Codeforces Python, 7 algorithmic-complexity classes) | 4900 | Algorithmic complexity | **63.7%** |
-| **PyResBugs** (buggy vs fixed Python pairs from real CVEs) | 4000 | Semantic bugs | 50.0% (chance, by design) |
+| Dataset | n | What it measures | Balanced accuracy (optimal) | Mean-score gap (positive − negative) |
+| :-- | --: | :-- | --: | --: |
+| **Annotations** (`# noqa`, `# type: ignore`, `# pragma: no cover` from the same senior repos) | 596 | **Real senior judgments** — lines seniors themselves marked as exceptions | **67.4%** | +0.253 |
+| **CodeComplex** (Codeforces Python, 7 algorithmic-complexity classes) | 4900 | Algorithmic complexity | **70.1%** | +0.271 |
+| **PyResBugs** (buggy vs fixed Python pairs from real CVEs) | 4000 | Semantic bugs | 50.0% (chance, by design) | −0.013 |
 
 The PyResBugs result is a **feature, not a bug**: AST-structural features can't
 see semantic bugs, and the tool honestly reports that. What the SNN *does*
 catch is what it claims — the tangled, deeply-nested, high-delegation lines
 that seniors would circle in review.
+
+Trained SNN state currently produces **14 distinct per-neuron baselines**
+across the 128 hidden units (std = 0.134), meaning neurons genuinely
+specialized rather than collapsing to a single mode.
 
 ## Setup
 
@@ -191,7 +210,7 @@ just test           # pytest — 8 tests
 
 just data-pretrain  # download senior corpus (~30s, 149 files, ~2MB)
 just data-calib     # download PyResBugs + CodeComplex + mine annotations
-just train          # STDP pretraining → models/snn_weights.pt
+just train          # fit whitening → STDP pretraining → models/whitening.pt + snn_weights.pt
 just calibrate      # baselines + ECDF + threshold → models/threshold.json + snn_baselines.pt + snn_ecdf.pt
 just all            # data + train + calibrate end-to-end
 

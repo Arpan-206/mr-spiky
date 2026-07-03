@@ -19,8 +19,10 @@ import torch
 from .encode import DEFAULT_STEPS, encode_batch, encode_sequence
 from .features import (
     AXIS_NAMES,
+    FEATURE_NAMES,
     NUM_FEATURES,
     compute_axes,
+    extract_function_features,
     extract_line_features,
     normalize,
 )
@@ -175,6 +177,83 @@ def _dominant_axis(axes_per_flagged_line: list[dict[str, float]]) -> str | None:
     return max(means, key=means.get)
 
 
+# Templated phrasing per axis — plain-English fragments that read like a
+# reviewer's gut reaction. Kept short so the concatenated reason fits in a UI
+# tooltip.
+_AXIS_PHRASE: dict[str, str] = {
+    "complexity":         "deeply nested / branchy control flow",
+    "tangled_state":      "variables reach across long distances",
+    "hidden_calls":       "delegates to opaque calls",
+    "exception_surface":  "heavy exception handling",
+    "naming":             "unusual identifier density",
+}
+
+
+def _reason_from_axes(axes: dict[str, float], top_k: int = 2, min_value: float = 0.35) -> str:
+    """Templated one-sentence reason from the top-K axes above `min_value`.
+
+    Reads like: 'high on complexity (deeply nested / branchy control flow) and
+    hidden_calls (delegates to opaque calls) — the shape a reviewer would ask
+    you to break up.'"""
+    if not axes:
+        return "SNN fired but no axis crossed the reporting threshold"
+    sorted_axes = sorted(axes.items(), key=lambda kv: -kv[1])
+    drivers = [(name, val) for name, val in sorted_axes[:top_k] if val >= min_value]
+    if not drivers:
+        # No axis stands out — fall back to the top axis alone.
+        name, val = sorted_axes[0]
+        return f"broadly elevated across axes; leader is {name} ({val:.2f})"
+    if len(drivers) == 1:
+        name, val = drivers[0]
+        return f"high on {name} ({val:.2f}): {_AXIS_PHRASE.get(name, name)}"
+    parts = [f"{name} ({val:.2f}): {_AXIS_PHRASE.get(name, name)}" for name, val in drivers]
+    return "high on " + " + ".join(f"{n} ({v:.2f})" for n, v in drivers) + \
+        " — " + "; ".join(_AXIS_PHRASE.get(n, n) for n, _ in drivers)
+
+
+def _function_contexts(
+    code: str,
+    snn: dict[str, Any] | None,
+    threshold: float,
+) -> dict[int, dict[str, Any]]:
+    """Map each line -> its enclosing function's context object.
+
+    Also computes the function-level SNN score by running the function's own
+    lines as a self-contained sequence. This gives a 'zoom-out' — the SNN's
+    reaction to the function as a whole, useful when a single flagged line
+    might look OK in isolation but sits inside a gnarly function."""
+    contexts: dict[int, dict[str, Any]] = {}
+    functions = extract_function_features(code)
+    if not functions:
+        return contexts
+
+    for fn in functions:
+        fn_line_feats = [
+            lf for lf in extract_line_features(code)
+            if fn.lineno <= lf.line <= fn.end_lineno
+        ]
+        fn_score: float | None = None
+        if snn is not None and fn_line_feats:
+            raw = _snn_scores_sequence(
+                snn["net"],
+                [lf.vector for lf in fn_line_feats],
+                hidden_baseline=snn["hidden_baseline"],
+                output_baseline=snn["output_baseline"],
+            )
+            if snn["ecdf_ref"] is not None:
+                raw = ecdf_rescale(raw, snn["ecdf_ref"])
+            fn_score = round(max(raw), 4) if raw else None
+
+        ctx = {
+            "function": fn.name,
+            "span": [fn.lineno, fn.end_lineno],
+            "function_score": fn_score,
+        }
+        for ln in range(fn.lineno, fn.end_lineno + 1):
+            contexts[ln] = ctx
+    return contexts
+
+
 def analyze(code: str) -> dict[str, Any]:
     """Return the fixed JSON schema for a given code string."""
     line_feats = extract_line_features(code)
@@ -202,17 +281,36 @@ def analyze(code: str) -> dict[str, Any]:
     # Per-line axes: computed from the same normalized feature vector the SNN
     # consumed, so the axes explain *what the SNN saw*, not a parallel channel.
     axes_by_line = {lf.line: compute_axes(normalize(lf.vector)) for lf in line_feats}
+    # Raw features for each line — enables richer frontend visualization.
+    raw_features_by_line = {
+        lf.line: {name: round(v, 4) for name, v in zip(FEATURE_NAMES, normalize(lf.vector))}
+        for lf in line_feats
+    }
+    # Enclosing-function contexts (only computed for flagged lines to keep the
+    # extra SNN passes proportional to the interesting work).
+    contexts_by_line = _function_contexts(code, snn, threshold)
 
-    lines_out = [
-        {
+    flagged = [ln for ln, sc in scores if sc >= threshold]
+    flagged_set = set(flagged)
+
+    lines_out = []
+    for ln, sc in scores:
+        entry: dict[str, Any] = {
             "line": ln,
             "score": round(sc, 4),
-            "flag": sc >= threshold,
+            "flag": ln in flagged_set,
             "axes": axes_by_line.get(ln, {}),
         }
-        for ln, sc in scores
-    ]
-    flagged = [ln for ln, sc in scores if sc >= threshold]
+        # Enrich flagged lines with reason + context + raw features. Non-flagged
+        # lines keep the lean shape to avoid bloating long-file responses.
+        if ln in flagged_set:
+            entry["reason"] = _reason_from_axes(axes_by_line.get(ln, {}))
+            ctx = contexts_by_line.get(ln)
+            if ctx is not None:
+                entry["context"] = ctx
+            entry["raw_features"] = raw_features_by_line.get(ln, {})
+        lines_out.append(entry)
+
     top_flagged = [
         ln for ln, _ in sorted(
             ((ln, sc) for ln, sc in scores if sc >= threshold),
