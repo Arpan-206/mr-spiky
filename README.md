@@ -1,70 +1,133 @@
 # Mr. Spiky — Intuition Compiler
 
-Backend for a hackathon tool that flags "suspicious" lines of Python code using a
-Spiking Neural Network trained unsupervised via STDP (spike-timing-dependent
-plasticity), plus per-line Temporal Spike Attribution at inference.
+> Can intuition be translated into something executable?
+> A senior engineer looks at code and instantly knows "this is wrong."
+> Mr. Spiky is a first attempt at encoding that intuition.
 
-## Pipeline
+A spiking neural network (SNN) trained unsupervised via STDP on **~2500 Python
+functions written by maintainers at CPython, Django, FastAPI, Flask, requests,
+black, httpx, pydantic, sqlalchemy, and poetry** — code that shipped through
+review at organizations with strong review culture. At inference the SNN reads
+your code line-by-line as a temporal stream and fires on lines that light up
+neurons which are usually quiet on senior-approved code.
 
-1. **Pretrain (unsupervised)** — sample 150–300 Python functions from
-   CodeSearchNet, extract structural features (nesting depth, length, token/naming
-   entropy, cyclomatic-complexity proxy), rate-code them into spike trains, and
-   train a small LIF SNN via STDP. Weights → `models/snn_weights.pt`.
-2. **Calibrate** — compute per-line TSA scores over the same CodeSearchNet
-   corpus, take `mean + 1·std` as the anomaly cutoff, and validate against a
-   labeled Python bug dataset (PyResBugs from HuggingFace, ~5000 pairs) purely
-   for provenance. Threshold + full stats → `models/threshold.json`.
+## What it does
 
-   **What the tool actually is, honestly:** a *structural complexity anomaly
-   detector*, not a bug detector. On PyResBugs (real Python buggy/fixed pairs),
-   flag rates for buggy and fixed versions are nearly identical (~57% vs ~62%)
-   because semantic bugs don't change AST structure. What the tool *does* catch
-   reliably: unusual nesting, cyclomatic complexity, and length — the kinds of
-   lines a reviewer would circle. The `labeled_stats` block in `threshold.json`
-   records this so it's transparent to the judges/reader.
-3. **Infer** — for new code, extract features per line, encode as spikes, run
-   through the SNN, compute TSA, and return per-line scores as JSON.
-
-Response schema (always the same, even in mock mode):
+Given Python source, `/analyze` returns per-line scores plus a multi-axis
+breakdown that explains *why* the SNN flagged something:
 
 ```json
 {
-  "verdict": "3 high-intensity spikes detected",
-  "lines": [{"line": 12, "score": 0.91, "flag": true}],
+  "verdict": "3 high-intensity spikes detected — dominant axis: complexity",
+  "dominant_axis": "complexity",
+  "lines": [
+    {
+      "line": 12,
+      "score": 0.94,
+      "flag": true,
+      "axes": {
+        "complexity": 0.99,
+        "tangled_state": 0.25,
+        "hidden_calls": 0.78,
+        "exception_surface": 0.63,
+        "naming": 0.81
+      }
+    }
+  ],
   "top_flagged": [12, 45, 88]
 }
 ```
 
+The five axes correspond to feature groups a reviewer would recognize:
+**complexity** (nesting, cyclomatic, length), **tangled_state** (use-def
+distance, name flow), **hidden_calls** (delegation to opaque calls),
+**exception_surface** (try/except/raise density), **naming** (token/name
+entropy).
+
+## Architecture
+
+**1. Pretrain (unsupervised STDP)** — 2 layer LIF SNN with 9 input dims →
+64 hidden → 16 output. Depression-dominated multiplicative STDP with weight
+decay prevents saturation. Trained on ~2500 functions from `data/senior_corpus.json`
+(auto-fetched from 10 respected Python repos).
+
+**2. Calibrate** — feed the training corpus through the trained SNN in
+sequence mode (each line = one timestep, membranes carry across lines) and
+compute:
+- **Per-neuron baseline** firing rates (what "normal" looks like per neuron).
+- **ECDF over corpus scores** (turns raw SNN output into a percentile rank).
+- **Anomaly threshold** at p90 = top-10%-most-unusual for senior code.
+
+**3. Infer** — for new code:
+1. Extract per-line features (skipping docstrings and imports).
+2. Run through the SNN as a temporal sequence.
+3. Score each line by *continuous membrane activation excess over the
+   per-neuron baseline* — not binary spike output. Continuous membranes are
+   what makes per-line scores smooth instead of collapsing to 4-5 discrete
+   values.
+4. ECDF-rescale so the score is a percentile rank vs senior code.
+
+## Validation (recorded in `models/threshold.json`)
+
+Three labeled datasets, ordered by relevance to the pitch:
+
+| Dataset | n | What it measures | Balanced accuracy (optimal) |
+| :-- | --: | :-- | --: |
+| **Annotations** (`# noqa`, `# type: ignore`, `# pragma: no cover` from the same senior repos) | 596 | **Real senior judgments** — lines seniors themselves marked as exceptions | **66.1%** |
+| **CodeComplex** (Codeforces Python, 7 algorithmic-complexity classes) | 4900 | Algorithmic complexity | **63.7%** |
+| **PyResBugs** (buggy vs fixed Python pairs from real CVEs) | 4000 | Semantic bugs | 50.0% (chance, by design) |
+
+The PyResBugs result is a **feature, not a bug**: AST-structural features can't
+see semantic bugs, and the tool honestly reports that. What the SNN *does*
+catch is what it claims — the tangled, deeply-nested, high-delegation lines
+that seniors would circle in review.
+
 ## Setup
 
 Requires [`uv`](https://docs.astral.sh/uv/) and [`just`](https://just.systems/).
+Python 3.12 (torch/snntorch don't ship 3.13+ wheels).
 
 ```bash
 uv sync
 ```
 
-Python is pinned to 3.12 because `torch`/`snntorch` don't yet publish wheels for
-3.13+.
-
 ## Run
 
 ```bash
-just api                 # start FastAPI on :8000 (mock mode if no weights yet)
-just smoke               # POST a sample snippet to the running API
+just api            # FastAPI on :8000 (mock mode until weights are trained)
+just smoke          # POST a sample snippet to the running API
+just test           # pytest — 8 tests
 
-just data-pretrain       # 250 Python functions from CodeSearchNet (HF, ~2-10 min)
-just data-calib          # 300 labeled Python samples from PyResBugs (HF, seconds)
-just train               # STDP pretraining → models/snn_weights.pt
-just calibrate           # anomaly threshold → models/threshold.json
-just all                 # data + train + calibrate end-to-end
+just data-pretrain  # download senior corpus (~30s, 149 files, ~2MB)
+just data-calib     # download PyResBugs + CodeComplex + mine annotations
+just train          # STDP pretraining → models/snn_weights.pt
+just calibrate      # baselines + ECDF + threshold → models/threshold.json + snn_baselines.pt + snn_ecdf.pt
+just all            # data + train + calibrate end-to-end
 
-just test                # pytest
+just docker-build   # multi-stage build with CPU-only torch (~350MB image)
+just docker-run     # run at :8000
 ```
+
+The API accepts `{code, language}`; non-Python languages return 400 (the
+AST features are Python-only).
 
 ## Mock mode
 
 Until `models/snn_weights.pt` exists, `infer.py` falls back to scoring lines
-directly from normalized AST features. The API stays up and returns the same
-JSON schema — a warning is logged on each request so it's obvious you're not
-running the trained SNN yet. This is intentional so the frontend can be wired up
-before training finishes.
+directly from normalized AST features via a hand-picked linear combination.
+The API stays up and returns the same JSON schema — a warning is logged on
+each request so it's obvious you're not running the trained SNN yet. This
+lets a frontend integrate against a live API before training completes.
+
+## Why an SNN?
+
+Senior developers read code sequentially and their gut fires at line 47
+because of what they've absorbed through line 46. LIF membrane potentials
+accumulate over time in exactly that way — a neuron that hasn't crossed
+threshold yet is still *carrying* the influence of prior lines. Feeding a
+function's lines as a temporal stream into the SNN and reading per-line
+membrane state gives us context-dependent per-line scores that neither a
+per-line MLP nor an average over rate-coded spikes can produce cleanly.
+
+The temporal architecture is what earns the "intuition" framing. STDP on the
+senior corpus is what gives the SNN *whose* intuition.
