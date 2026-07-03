@@ -13,36 +13,110 @@ neurons which are usually quiet on senior-approved code.
 
 ## What it does
 
-Given Python source, `/analyze` returns per-line scores plus a multi-axis
-breakdown that explains *why* the SNN flagged something:
+Given Python source, `POST /analyze` (body: `{code, language}`) returns per-line
+scores plus a multi-axis breakdown that explains *why* the SNN flagged
+something.
+
+## API reference (frontend integration)
+
+### Endpoints
+
+- `POST /analyze` — body `{code: string, language: "python"}`. Non-Python
+  languages return HTTP 400.
+- `GET /health` — returns `{status: "ok", supported_languages: ["python"]}`.
+  Use to feature-gate the language selector.
+
+### Response shape
+
+Two line shapes: **flagged** lines carry extra reasoning fields; **unflagged**
+lines stay lean to keep long-file responses small.
 
 ```json
 {
   "verdict": "3 high-intensity spikes detected — dominant axis: complexity",
   "dominant_axis": "complexity",
+  "top_flagged": [167, 166, 165],
   "lines": [
+    // --- flagged line (all fields present) ---
     {
-      "line": 12,
-      "score": 0.94,
+      "line": 167,
+      "score": 0.99,
       "flag": true,
       "axes": {
-        "complexity": 0.99,
-        "tangled_state": 0.25,
-        "hidden_calls": 0.78,
-        "exception_surface": 0.63,
-        "naming": 0.81
+        "complexity": 1.0,
+        "tangled_state": 1.0,
+        "hidden_calls": 1.0,
+        "exception_surface": 0.0,
+        "naming": 0.97
+      },
+      "reason": "high on complexity (1.00) + tangled_state (1.00) — deeply nested / branchy control flow; variables reach across long distances",
+      "context": {
+        "function": "per_timestep_attribution",
+        "span": [121, 189],
+        "function_score": 0.99
+      },
+      "raw_features": {
+        "nesting_depth": 1.0, "length": 0.1, "token_entropy": 0.59,
+        "naming_entropy": 0.77, "cyclomatic_proxy": 0.55,
+        "use_def_distance": 1.0, "name_flow": 0.33,
+        "call_graph_shape": 1.0, "exception_density": 0.0
       }
+    },
+    // --- unflagged line (lean shape) ---
+    {
+      "line": 168,
+      "score": 0.41,
+      "flag": false,
+      "axes": { "complexity": 0.55, "tangled_state": 0.3, "...": "..." }
     }
-  ],
-  "top_flagged": [12, 45, 88]
+  ]
 }
 ```
 
-The five axes correspond to feature groups a reviewer would recognize:
-**complexity** (nesting, cyclomatic, length), **tangled_state** (use-def
-distance, name flow), **hidden_calls** (delegation to opaque calls),
-**exception_surface** (try/except/raise density), **naming** (token/name
-entropy).
+### How to render each field
+
+| Field | Type | Rendering suggestion |
+| :-- | :-- | :-- |
+| `verdict` | string | Banner at top of the result panel. Already includes the dominant axis, no extra formatting needed. |
+| `dominant_axis` | string \| null | If not null, highlight this axis on your per-line axis chart so the user knows what the SNN is objecting to *overall*. |
+| `top_flagged` | list<int> | Line numbers, worst first. Perfect for a "jump to next hot line" button or a table of contents. |
+| `lines[i].line` | int (1-based) | Match to your source line numbering. |
+| `lines[i].score` | float ∈ [0,1] | The main scalar. Interpret as *percentile rank against senior code*: `0.9` = "top 10% most unusual line vs Django/CPython/etc." Great for background-color intensity. |
+| `lines[i].flag` | bool | Whether `score ≥ threshold` (default 0.9). Use for the gutter marker / underline. |
+| `lines[i].axes` | dict<string, float> | Five axes, each ∈ [0,1] roughly (may briefly exceed 1.0 by ~5%). Radar chart or horizontal-bar breakdown per line. See the axis glossary below. |
+| `lines[i].reason` | string *(flagged only)* | Ready-to-display tooltip / hover text. Reads like reviewer feedback. |
+| `lines[i].context` | object *(flagged only)* | `{function, span: [start, end], function_score}`. `function_score` is the SNN's score for the *enclosing function as a whole* — useful to show "this line is inside a function that's also gnarly," or to fold flagged lines by function. |
+| `lines[i].raw_features` | dict<string, float> *(flagged only)* | The 9 normalized inputs. Only bother rendering if you want a debug/expert view — the axes are what humans read. |
+
+### Axis glossary (for tooltips / legends)
+
+Each axis is a normalized 0-to-1 signal derived from the AST features that
+went into the SNN. Same feature can contribute to multiple axes.
+
+| Axis | Plain-English meaning | Features that drive it |
+| :-- | :-- | :-- |
+| **complexity** | Deeply nested / branchy control flow. | `nesting_depth`, `cyclomatic_proxy`, `length` |
+| **tangled_state** | Variables reach across long distances; the line pulls in many named things at once. | `use_def_distance`, `name_flow` |
+| **hidden_calls** | Delegates to opaque calls (user-defined, non-stdlib). Reviewer would ask "what does that function do?" | `call_graph_shape` |
+| **exception_surface** | Try/except/raise density is high for the scope. | `exception_density` |
+| **naming** | Unusual identifier density (many distinct names or unusual character distribution). Not always bad — flags very information-dense lines. | `token_entropy`, `naming_entropy` |
+
+### Score interpretation cheat-sheet
+
+- `score < 0.5` — comfortably normal for senior code. Don't draw attention.
+- `0.5 ≤ score < 0.7` — moderately unusual. Consider a subtle marker (light
+  color) but no flag.
+- `0.7 ≤ score < 0.9` — noticeably above senior baseline. Not flagged by
+  default but a "warm" line. Good for hover tooltips only.
+- `score ≥ 0.9` — flagged. Renders with `flag: true` and includes `reason`,
+  `context`, and `raw_features`. Show prominently.
+
+### Empty / error states
+
+- Blank input → `{verdict: "no suspicious spikes detected", lines: [], top_flagged: [], dominant_axis: null}`. Render a neutral "nothing to analyze" state.
+- Python syntax error → same shape, empty `lines`. **Don't** show an error banner — the tool just returned nothing to flag. Show your own parser feedback if you have one.
+- Non-Python language → HTTP 400 with `detail: "language 'X' not supported. Mr. Spiky's AST features are Python-only. Supported: ['python']"`. Surface as an error toast; disable the analyze button until the user switches back to Python.
+- Mock mode (no trained weights on the backend) → same schema, scores derived from a linear combination of raw features. **The response body doesn't announce mock mode** — the server logs a warning. If you need to know, hit `/health` first; it's the same in both modes but the response time is faster (~10ms vs ~200ms) in mock mode.
 
 ## Architecture
 
