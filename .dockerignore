@@ -1,0 +1,33 @@
+# Local envs / caches
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Repo / VCS
+.git/
+.gitignore
+.github/
+
+# Docs and scripts not needed at runtime
+README.md
+justfile
+
+# Tests
+tests/
+
+# Downloaded raw parquet caches (data/*.json is intentionally NOT ignored —
+# those are the small curated snapshots the app uses)
+data/*.parquet
+data/*.csv
+data/cache/
+data/hf_cache/
+~/.cache/huggingface/
