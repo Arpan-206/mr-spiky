@@ -14,9 +14,12 @@ RUN pip install --no-cache-dir uv==0.11.15
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
-# Install runtime deps only into /opt/venv. torch is ~800MB so this layer is
-# heavy — pinned separately so code changes don't re-download it.
-RUN uv sync --frozen --no-dev --no-install-project
+# Install runtime deps only into /opt/venv.
+# On Linux, `[tool.uv.sources]` in pyproject.toml routes torch to the CPU-only
+# wheel index (drops ~3GB of NVIDIA transitive deps). On macOS local dev it
+# stays on PyPI. `--frozen` is dropped because the lockfile was generated on
+# macOS where the default source applies.
+RUN uv sync --no-dev --no-install-project
 
 
 # ---- Stage 2: runtime image ----------------------------------------------
