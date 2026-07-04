@@ -69,7 +69,7 @@ spike when they cross threshold. Feed a function's lines in one at a
 time — the neuron carries context across lines and fires on the ones a
 reviewer would flinch at.
 
-![LIF membrane accumulating across code lines](docs/deck/assets/lif_membrane_over_lines.mp4)
+<video src="docs/deck/assets/lif_membrane_over_lines.mp4" controls muted playsinline width="720"></video>
 
 *A spiking neuron scans a real 14-line function from the CPython stdlib
 (`linecache.checkcache`) and flinches at the same bare-except line a
@@ -82,7 +82,7 @@ authored Python functions and let neurons wire themselves according to
 which patterns co-fire. No gradient descent. No labels. No teacher.
 Different neurons end up specialized on different structural patterns.
 
-![STDP: A→B strengthens on exception handling, A→C stays weak](docs/deck/assets/stdp_learning_rule.mp4)
+<video src="docs/deck/assets/stdp_learning_rule.mp4" controls muted playsinline width="720"></video>
 
 *Three neurons; over six exposures A→B strengthens on exception-handling
 patterns while A→C stays weak. Visual proof of differential
