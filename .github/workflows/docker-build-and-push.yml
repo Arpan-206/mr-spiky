@@ -19,7 +19,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
@@ -41,7 +41,11 @@ jobs:
 
       - name: Tag + push
         run: |
-          IMAGE=ghcr.io/${{ github.repository_owner }}/mr-spiky
+          # GHCR requires lowercase repo names; `github.repository_owner`
+          # preserves the original casing (e.g. "Arpan-206") so we lowercase
+          # it here rather than relying on user config.
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER_LC}/mr-spiky"
           docker tag mr-spiky:build "$IMAGE:latest"
           docker push "$IMAGE:latest"
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
