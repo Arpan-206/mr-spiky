@@ -257,6 +257,19 @@ disable confidence badges. A warning is also logged server-side on each
 request. This lets a frontend integrate against a live API before training
 completes.
 
+## PR review bot
+
+Mr. Spiky can also run as a GitHub Action that reviews pull requests. It
+comments inline on structurally-unusual lines the PR added or modified, with
+reasoning ("high on complexity + hidden_calls — deeply nested / branchy
+control flow") and a summary of what changed at the top of the PR.
+
+See [`docs/GITHUB_ACTION.md`](docs/GITHUB_ACTION.md) for how to adopt the
+workflow in another repo (it's a two-line copy-paste). For local dry runs
+against any PR: `just review-pr owner/repo 42`. Uses a stricter threshold
+than the interactive API (default 0.95) and caps comments per PR (default 5)
+so the bot stays signal-heavy.
+
 ## Why an SNN?
 
 Senior developers read code sequentially and their gut fires at line 47

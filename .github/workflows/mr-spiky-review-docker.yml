@@ -1,0 +1,81 @@
+name: Mr. Spiky code review (Docker variant)
+
+# Same PR-review behavior as mr-spiky-review.yml, but runs Mr. Spiky as a
+# Docker container instead of installing torch in the runner. Trade-off:
+#   - Faster per-run (~30s cold vs ~2-3 min for the uv install path).
+#   - Requires the image to be published to ghcr.io/arpan-206/mr-spiky.
+#     See `docker-build-and-push.yml` for the publish step.
+#
+# For a repo just trying Mr. Spiky, prefer mr-spiky-review.yml (no image
+# dependency). This variant exists for larger orgs where cold-CI-time
+# matters and they're OK pinning a container image tag.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  MRSPIKY_IMAGE: ghcr.io/arpan-206/mr-spiky:latest
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch PR diff + head checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr diff ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            > pr.patch
+          gh repo clone ${{ github.event.pull_request.head.repo.full_name }} pr-checkout -- \
+            --branch ${{ github.event.pull_request.head.ref }} \
+            --depth 1
+
+      - name: Run review inside the Mr. Spiky container
+        run: |
+          docker pull "$MRSPIKY_IMAGE"
+          docker run --rm \
+            -v "$PWD/pr.patch:/work/pr.patch:ro" \
+            -v "$PWD/pr-checkout:/work/pr-checkout:ro" \
+            "$MRSPIKY_IMAGE" \
+            python -m src.review \
+              --diff /work/pr.patch \
+              --root /work/pr-checkout \
+              --min-score 0.95 \
+              --max-comments 5 \
+              --format json \
+            > review.json
+          cat review.json
+
+      - name: Post review comments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          data = json.load(open("review.json"))
+          payload = {
+              "commit_id": os.environ["HEAD_SHA"],
+              "event": "COMMENT",
+              "body": data.get("summary_comment", ""),
+              "comments": [
+                  {"path": c["path"], "line": c["line"], "side": c["side"], "body": c["body"]}
+                  for c in data.get("inline_comments", [])
+              ],
+          }
+          subprocess.run(
+              ["gh", "api", "--method", "POST",
+               f"repos/{os.environ['REPO']}/pulls/{os.environ['PR']}/reviews",
+               "--input", "-"],
+              input=json.dumps(payload).encode(),
+              check=True,
+          )
+          PY

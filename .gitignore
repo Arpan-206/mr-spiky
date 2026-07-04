@@ -1,5 +1,7 @@
 .temp/
 .venv/
+models.tar.gz
+models.tar.gz.sha256
 __pycache__/
 *.pyc
 .pytest_cache/

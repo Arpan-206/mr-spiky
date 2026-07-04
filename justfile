@@ -47,6 +47,37 @@ test:
 # End-to-end: fetch data, train, calibrate
 all: data-pretrain data-calib train calibrate
 
+# --- Review CLI ---
+# Score a PR locally (uses `gh` auth, does NOT post):
+#   just review-pr owner/repo 42
+review-pr repo pr:
+    uv run python3 -m src.review --pr {{repo}}#{{pr}} --format human
+
+# Score a diff file locally against a checkout:
+#   just review-diff path/to.patch path/to/checkout
+review-diff diff root:
+    uv run python3 -m src.review --diff {{diff}} --root {{root}} --format human
+
+# --- Release packaging ---
+# Package trained model artifacts for the GitHub Action to download.
+# Produces models.tar.gz + a SHA-256 checksum. Attach both to a release with
+#   gh release create v0.1.0 models.tar.gz models.tar.gz.sha256
+release-models:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f models/snn_weights.pt ]; then
+        echo "no models/snn_weights.pt — run \`just all\` first" >&2
+        exit 1
+    fi
+    tar -czvf models.tar.gz \
+        models/snn_weights.pt \
+        models/snn_baselines.pt \
+        models/snn_ecdf.pt \
+        models/whitening.pt \
+        models/threshold.json
+    shasum -a 256 models.tar.gz > models.tar.gz.sha256
+    ls -lh models.tar.gz models.tar.gz.sha256
+
 # --- Docker ---
 IMAGE := "mrspiky:latest"
 

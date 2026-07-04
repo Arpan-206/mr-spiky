@@ -1,0 +1,50 @@
+name: Build + push Mr. Spiky image
+
+# Pushes the Mr. Spiky Docker image to ghcr.io so the Docker-variant review
+# workflow (mr-spiky-review-docker.yml) has something to pull. Runs when we
+# push to main (image tagged `latest`) or tag a release (image tagged with
+# the release version).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build image
+        run: |
+          # Ensure models/ exists so the Dockerfile's COPY doesn't fail.
+          # The image will end up in mock mode without weights, but that's
+          # fine — the Action passes --min-score which works either way.
+          mkdir -p models
+          if [ ! -f models/snn_weights.pt ]; then
+            echo "no trained weights checked in — building with empty models/"
+          fi
+          docker build -t mr-spiky:build .
+
+      - name: Tag + push
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/mr-spiky
+          docker tag mr-spiky:build "$IMAGE:latest"
+          docker push "$IMAGE:latest"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            docker tag mr-spiky:build "$IMAGE:${{ github.ref_name }}"
+            docker push "$IMAGE:${{ github.ref_name }}"
+          fi
