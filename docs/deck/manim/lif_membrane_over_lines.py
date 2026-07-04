@@ -1,84 +1,53 @@
 """
-Mr. Spiky pitch clip 1: "A neuron reads code the way you do." (~25s)
+Mr. Spiky pitch clip 1: "A neuron reads code the way you do." (~22s)
 
-Wow-first. Three beats:
+DESIGN RULES (do not break):
+  - The composition stays visible for the entire clip. No cuts to blank
+    scenes. Punchlines land in a bottom banner strip, they don't replace
+    the visual.
+  - Every mobject must sit inside safe bounds:
+        x in [-6.8, 6.8]
+        y in [-3.8, 3.8]
+    Manim's default frame is 14.222 wide × 8.0 tall (aspect 16:9), so
+    those bounds leave ~0.3 units of safety. Wide Text is bounded by
+    calling .set(width=W) after construction.
+  - The reviewer's eye and the neuron's membrane trace rise in visible
+    sync. That's the whole point of the clip. Break the sync, break
+    the claim.
 
-1. (0-8s) Side by side. Reviewer's eye scanning code + gut-reaction meter on
-   the left; LIF neuron + membrane trace on the right. Both rise together.
-   Both spike on the same gnarly line. No text yet — the visual is the
-   claim.
-
-2. (8-16s) The two panels *overlay* into one. Reveal: the neuron and the
-   reviewer are doing the same thing. Punchline text: "same accumulation.
-   same threshold. same reaction."
-
-3. (16-25s) Zoom out. The neuron's sensitivity came from being exposed to
-   2680 senior functions during training — direct bridge to clip 2.
-   Punchline: "and its intuition came from the same place yours did —
-   reading a lot of code."
-
-Design invariants to preserve if editing:
-  * Reviewer-eye trace and membrane trace MUST rise in visible sync. If
-    they drift, the "same thing" claim reads as a coincidence, not a
-    parallel.
-  * Text is small and enters LATE in each beat. The presenter's voice
-    carries the narration; text is the anchor, not the script.
-  * Only the last line (compound `if`) crosses threshold. Earlier bumps
-    are sub-threshold so the "context accumulates" story reads visually.
-  * The leak between line inputs must stay visible — it's the "L" in LIF
-    and drops the metaphor if removed.
-
-Render:
-    manim -qm lif_membrane_over_lines.py LIFMembraneOverLines
+Render: manim -qm lif_membrane_over_lines.py LIFMembraneOverLines
 """
 
 from manim import (
-    Scene,
-    Code,
-    Circle,
-    Dot,
-    Text,
-    DashedLine,
-    Axes,
-    VGroup,
-    VMobject,
-    Rectangle,
-    Write,
-    FadeIn,
-    FadeOut,
-    Flash,
-    Create,
-    Transform,
-    ReplacementTransform,
-    UP,
-    DOWN,
-    LEFT,
-    RIGHT,
-    ORIGIN,
-    WHITE,
-    GRAY,
-    YELLOW,
-    ORANGE,
-    RED,
-    BLUE,
-    GREEN,
-    linear,
+    Scene, Code, Circle, Dot, Text, DashedLine, Axes,
+    VGroup, VMobject, Rectangle, RoundedRectangle,
+    Write, FadeIn, FadeOut, Flash, Create, Transform,
+    UP, DOWN, LEFT, RIGHT, ORIGIN, WHITE, GRAY, YELLOW, ORANGE, RED,
     smooth,
 )
 import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Palette — match the deck's spike-yellow accent so the clip and the reveal.js
-# slides feel like one piece.
+# Safe frame bounds. Manim's default frame is 14.222 × 8.0. Constrain to a
+# rectangle 0.3 units inside that on every side so text never clips.
 # ---------------------------------------------------------------------------
+X_MAX =  6.8
+X_MIN = -6.8
+Y_MAX =  3.8
+Y_MIN = -3.8
+
 BG        = "#0f0f0f"
 SPIKE     = "#ffd54a"
 SPIKE_HOT = "#ff9a3a"
-LINE_MID  = "#3a3a3f"
-DIM       = "#8a8a92"
 NEURON_C  = "#ffd54a"
 EYE_C     = "#7fd6ff"
+LINE_MID  = "#3a3a3f"
+DIM       = "#8a8a92"
+
+# Text that could get wide is bounded by .set(width=...) after construction.
+MAX_HEADING_W = 5.4    # each panel is ~6.5 wide with 0.5 buff, so 5.4 fits comfortably
+MAX_BANNER_W  = 12.0   # the bottom banner spans most of the frame
 
 
 CODE_LINES = [
@@ -88,12 +57,26 @@ CODE_LINES = [
     "        if item.valid and item.score > threshold:",
 ]
 
-# Per-line "structural intensity" — matches how the SNN would react.
-# The last line (compound `if`) is the only one that pushes membrane over
-# threshold. Earlier lines contribute meaningful sub-threshold accumulation.
+# Per-line "structural intensity." Only the last line pushes the membrane
+# over threshold. Earlier lines contribute meaningful sub-threshold
+# accumulation so the "context builds up" story reads.
 BUMPS   = [0.22, 0.18, 0.38, 0.62]
-LEAK    = 0.78   # membrane fraction retained per timestep between lines
+LEAK    = 0.78    # fraction retained between line inputs
 THRESH  = 1.00
+
+
+def clamp_to_frame(mob):
+    """Assert helper — verify a mobject stays inside safe bounds after we
+    place it. Runs at construct time so a bad placement fails loudly
+    instead of silently clipping in the rendered mp4."""
+    left, right, top, bot = (
+        mob.get_left()[0], mob.get_right()[0],
+        mob.get_top()[1],  mob.get_bottom()[1],
+    )
+    assert left  >= X_MIN - 0.05, f"{mob} clips left  ({left:.2f} < {X_MIN})"
+    assert right <= X_MAX + 0.05, f"{mob} clips right ({right:.2f} > {X_MAX})"
+    assert top   <= Y_MAX + 0.05, f"{mob} clips top   ({top:.2f} > {Y_MAX})"
+    assert bot   >= Y_MIN - 0.05, f"{mob} clips bot   ({bot:.2f} < {Y_MIN})"
 
 
 class LIFMembraneOverLines(Scene):
@@ -101,262 +84,271 @@ class LIFMembraneOverLines(Scene):
         self.camera.background_color = BG
 
         # ==================================================================
-        # BEAT 1 — Side-by-side (0-8s)
-        # Left: reviewer eye + gut-reaction meter.
-        # Right: LIF neuron + membrane trace.
+        # LAYOUT — Fixed regions, computed once, honored for the whole clip.
         # ==================================================================
-        left_label = Text(
-            "a reviewer reading code",
-            font_size=22, color=DIM,
-        ).to_edge(LEFT, buff=0.6).to_edge(UP, buff=0.4)
-        right_label = Text(
-            "a spiking neuron reading the same code",
-            font_size=22, color=DIM,
-        ).to_edge(RIGHT, buff=0.6).to_edge(UP, buff=0.4)
+        # Bottom banner strip lives at y in [-3.6, -2.8]. Everything else
+        # lives above y = -2.6 so the banner never overlaps the composition.
+        BANNER_Y = -3.2
 
-        self.play(FadeIn(left_label), FadeIn(right_label), run_time=0.5)
+        # Left panel occupies x in [-6.6, -0.2]; right panel x in [0.2, 6.6].
+        LEFT_CX  = -3.4     # left panel center x
+        RIGHT_CX =  3.4     # right panel center x
 
-        # --- LEFT: code + gut meter ------------------------------------
+        # Vertical: headings at y=3.4, main content y=1.6 down to y=-2.4.
+
+        # ==================================================================
+        # HEADINGS — small, centered above each panel
+        # ==================================================================
+        heading_left = Text("a reviewer reading code", font_size=22, color=DIM)
+        heading_left.set(width=min(heading_left.width, MAX_HEADING_W))
+        heading_left.move_to([LEFT_CX, 3.4, 0])
+        clamp_to_frame(heading_left)
+
+        heading_right = Text("a spiking neuron", font_size=22, color=DIM)
+        heading_right.set(width=min(heading_right.width, MAX_HEADING_W))
+        heading_right.move_to([RIGHT_CX, 3.4, 0])
+        clamp_to_frame(heading_right)
+
+        self.play(FadeIn(heading_left), FadeIn(heading_right), run_time=0.5)
+
+        # ==================================================================
+        # LEFT PANEL — code + eye + gut meter
+        # ==================================================================
         code_block = Code(
             code_string="\n".join(CODE_LINES),
             language="python",
             background="window",
             tab_width=4,
             formatter_style="monokai",
-        ).scale(0.5)
-        code_block.next_to(left_label, DOWN, buff=0.35).align_to(left_label, LEFT)
+        ).scale(0.55)
+        # Center code horizontally in the left panel, and position vertically.
+        code_block.move_to([LEFT_CX, 1.1, 0])
+        # Guarantee it fits — if the code renders wider than we expect, shrink.
+        if code_block.width > 5.6:
+            code_block.set(width=5.6)
+        clamp_to_frame(code_block)
 
-        # The eye — a small blue dot that will step down through the lines.
+        # Gut-reaction bar — narrow vertical, sitting to the left of the code.
+        gut_bar_x = code_block.get_left()[0] - 0.5
+        gut_bar_top    = code_block.get_top()[1]
+        gut_bar_bot    = code_block.get_bottom()[1]
+        gut_frame = Rectangle(
+            width=0.22,
+            height=gut_bar_top - gut_bar_bot,
+            color=LINE_MID, stroke_width=1.5,
+        ).move_to([gut_bar_x, (gut_bar_top + gut_bar_bot) / 2, 0])
+        gut_label = Text("gut", font_size=14, color=DIM)
+        gut_label.next_to(gut_frame, DOWN, buff=0.12)
+        clamp_to_frame(gut_frame)
+        clamp_to_frame(gut_label)
+
+        # Gut fill — a rectangle inside gut_frame; height animates.
+        def make_gut_fill(fill_frac):
+            h = max(0.001, (gut_bar_top - gut_bar_bot) * fill_frac)
+            fill = Rectangle(
+                width=0.20, height=h,
+                color=EYE_C, fill_opacity=0.85, stroke_width=0,
+            )
+            fill.move_to([gut_bar_x, gut_bar_bot + h / 2, 0])
+            return fill
+        gut_fill = make_gut_fill(0.0)
+
+        # The eye — a dot that lands on each code line in sequence.
         eye = Dot(radius=0.10, color=EYE_C)
-        eye_glow = Circle(radius=0.16, color=EYE_C, fill_opacity=0.25, stroke_width=0)
+        eye_glow = Circle(radius=0.16, color=EYE_C, fill_opacity=0.28, stroke_width=0)
         eye_group = VGroup(eye_glow, eye)
-        eye_group.move_to(code_block.get_left() + LEFT * 0.2 + UP * 0.6)
-
-        # Gut-reaction meter — a vertical bar next to the code that fills up.
-        gut_frame = Rectangle(height=1.5, width=0.22, color=LINE_MID, stroke_width=1.5)
-        gut_frame.next_to(code_block, DOWN, buff=0.3).align_to(code_block, LEFT)
-        gut_fill = Rectangle(height=0.001, width=0.20, color=EYE_C, fill_opacity=0.85, stroke_width=0)
-        gut_fill.next_to(gut_frame.get_bottom(), UP, buff=0.005).align_to(gut_frame, LEFT).shift(RIGHT * 0.01)
-        gut_label = Text("gut", font_size=14, color=DIM).next_to(gut_frame, RIGHT, buff=0.15)
-        gut_thresh = DashedLine(
-            gut_frame.get_left() + UP * 0.55,
-            gut_frame.get_right() + UP * 0.55,
-            color=DIM, stroke_width=1.2, dash_length=0.05,
-        )
+        # Position at first line initially.
+        first_line_y = list(code_block.code_lines)[0].get_center()[1]
+        eye_group.move_to([code_block.get_left()[0] - 0.15, first_line_y, 0])
+        # But start invisible; fade in with the panel.
 
         self.play(
             Create(code_block),
             Create(gut_frame),
             FadeIn(gut_label),
-            Create(gut_thresh),
+            FadeIn(gut_fill),
             FadeIn(eye_group),
             run_time=1.0,
         )
 
-        # --- RIGHT: neuron + membrane trace ----------------------------
-        neuron = Circle(radius=0.28, color=NEURON_C, stroke_width=3).set_fill(NEURON_C, opacity=0.15)
-        neuron.next_to(right_label, DOWN, buff=0.35).shift(RIGHT * 1.5)
-        neuron_label = Text("V", font_size=18, color=NEURON_C, slant="ITALIC")
-        neuron_label.move_to(neuron.get_center())
+        # ==================================================================
+        # RIGHT PANEL — neuron + membrane axes
+        # ==================================================================
+        neuron = Circle(radius=0.32, color=NEURON_C, stroke_width=3).set_fill(NEURON_C, opacity=0.15)
+        neuron.move_to([RIGHT_CX, 2.15, 0])
+        neuron_label = Text("V", font_size=20, color=NEURON_C, slant="ITALIC").move_to(neuron.get_center())
+        clamp_to_frame(neuron)
 
+        # Membrane trace axes — sits below the neuron, safely inside bounds.
         axes = Axes(
             x_range=[0, 4, 1],
-            y_range=[0, 1.3, 0.5],
-            x_length=3.6,
-            y_length=1.6,
+            y_range=[0, 1.3, 1],
+            x_length=4.4,
+            y_length=2.2,
             tips=False,
             axis_config={"color": LINE_MID, "stroke_width": 1.5, "include_ticks": False},
         )
-        axes.next_to(neuron, DOWN, buff=0.35).align_to(gut_frame, DOWN)
+        axes.move_to([RIGHT_CX, -0.35, 0])
+        clamp_to_frame(axes)
+
         thresh_line = DashedLine(
             axes.c2p(0, THRESH),
             axes.c2p(4, THRESH),
             color=DIM, stroke_width=1.2, dash_length=0.06,
         )
-        thresh_label = Text("threshold", font_size=13, color=DIM)
-        thresh_label.next_to(axes.c2p(4, THRESH), RIGHT, buff=0.05)
+        thresh_label = Text("threshold", font_size=14, color=DIM)
+        thresh_label.next_to(axes.c2p(0, THRESH), UP, buff=0.05).align_to(axes, LEFT).shift(RIGHT * 0.1)
+        clamp_to_frame(thresh_label)
 
-        membrane_trace = VMobject(color=SPIKE, stroke_width=2.8)
+        membrane_trace = VMobject(color=SPIKE, stroke_width=3)
         membrane_trace.set_points_as_corners([axes.c2p(0, 0), axes.c2p(0.001, 0)])
 
         self.play(
-            Create(neuron),
-            FadeIn(neuron_label),
+            Create(neuron), FadeIn(neuron_label),
             Create(axes),
-            Create(thresh_line),
-            FadeIn(thresh_label),
+            Create(thresh_line), FadeIn(thresh_label),
             Create(membrane_trace),
             run_time=1.0,
         )
 
-        # --- Sync animation: eye reads line by line, meter rises, membrane rises.
+        # ==================================================================
+        # BOTTOM BANNER — a persistent strip that changes text across beats
+        # ==================================================================
+        banner_bg = RoundedRectangle(
+            width=12.6, height=0.9,
+            corner_radius=0.15,
+            color=LINE_MID, stroke_width=1.0,
+        ).set_fill("#141416", opacity=0.9)
+        banner_bg.move_to([0, BANNER_Y, 0])
+        clamp_to_frame(banner_bg)
+
+        banner_text = Text("", font_size=22, color=WHITE)
+        banner_text.move_to(banner_bg.get_center())
+
+        self.play(FadeIn(banner_bg), run_time=0.35)
+
+        def set_banner(new_str: str, color=WHITE, run_time: float = 0.35):
+            """Fade the banner's text to a new string, in place."""
+            nonlocal banner_text
+            new_text = Text(new_str, font_size=22, color=color)
+            new_text.set(width=min(new_text.width, MAX_BANNER_W))
+            new_text.move_to(banner_bg.get_center())
+            self.play(Transform(banner_text, new_text), run_time=run_time)
+
+        # Beat 1 banner.
+        set_banner("watch these two rise together.", DIM)
+
+        # ==================================================================
+        # BEAT 1 — Synchronized reading (0..8s)
+        # Eye moves down code lines. Membrane and gut fill rise in sync.
+        # ==================================================================
         v = 0.0
         trace_points = [axes.c2p(0, 0)]
         code_line_mobs = list(code_block.code_lines)
 
         for idx, (line_mob, bump) in enumerate(zip(code_line_mobs, BUMPS)):
-            # Eye moves to this code line.
-            target_eye_y = line_mob.get_center()[1]
-            new_eye_pos = np.array([
-                code_block.get_left()[0] - 0.2,
-                target_eye_y,
-                0.0,
-            ])
-            # Between-line leak (small backward slope on the trace).
+            target_y = line_mob.get_center()[1]
+            new_eye_pos = np.array([code_block.get_left()[0] - 0.15, target_y, 0.0])
+
+            # Between-line leak.
             if idx > 0:
                 v_pre = v * LEAK
-                leak_x = idx - 0.5
-                trace_points.append(axes.c2p(leak_x, v_pre))
-                gut_pre_h = min(1.5, v_pre * 1.5)
-                new_gut_pre = Rectangle(
-                    height=max(gut_pre_h, 0.001), width=0.20,
-                    color=EYE_C, fill_opacity=0.85, stroke_width=0,
-                ).align_to(gut_frame, DOWN).align_to(gut_frame, LEFT).shift(RIGHT * 0.01)
-                partial_trace = VMobject(color=SPIKE, stroke_width=2.8)
+                trace_points.append(axes.c2p(idx - 0.5, v_pre))
+                partial_trace = VMobject(color=SPIKE, stroke_width=3)
                 partial_trace.set_points_as_corners(trace_points)
+                new_gut_pre = make_gut_fill(v_pre / 1.3)  # normalize by y_max=1.3
                 self.play(
                     eye_group.animate.move_to(new_eye_pos),
                     Transform(gut_fill, new_gut_pre),
                     Transform(membrane_trace, partial_trace),
-                    run_time=0.5,
-                    rate_func=smooth,
+                    run_time=0.45, rate_func=smooth,
                 )
                 v = v_pre
 
-            # The line highlights as the eye lands on it.
-            self.play(
-                line_mob.animate.set_fill(color=WHITE, opacity=1),
-                run_time=0.1,
-            )
+            # The line highlights as the eye lands.
+            self.play(line_mob.animate.set_fill(color=WHITE, opacity=1.0), run_time=0.08)
 
-            # Bump: membrane rises, gut meter rises.
             v_post = v + bump
             trace_points.append(axes.c2p(idx + 1, v_post))
-            gut_h = min(1.5, v_post * 1.5)
-            new_gut = Rectangle(
-                height=max(gut_h, 0.001), width=0.20,
-                color=EYE_C, fill_opacity=0.85, stroke_width=0,
-            ).align_to(gut_frame, DOWN).align_to(gut_frame, LEFT).shift(RIGHT * 0.01)
-            new_trace = VMobject(color=SPIKE, stroke_width=2.8)
+            new_trace = VMobject(color=SPIKE, stroke_width=3)
             new_trace.set_points_as_corners(trace_points)
+            new_gut = make_gut_fill(min(1.0, v_post / 1.3))
 
-            # If this line crosses threshold: flash + color shift.
             if v_post >= THRESH and v < THRESH:
-                # Recolor the trace's crossing segment orange.
+                # Threshold crossing — recolor + flash both sides.
                 new_trace.set_color(SPIKE_HOT)
                 self.play(
                     Transform(gut_fill, new_gut),
                     Transform(membrane_trace, new_trace),
                     neuron.animate.set_stroke(SPIKE_HOT, width=5).set_fill(SPIKE_HOT, opacity=0.5),
-                    Flash(neuron, color=SPIKE_HOT, flash_radius=0.5, num_lines=14),
-                    run_time=0.6,
-                )
-                # The reviewer flinches — quick red pulse on the eye too.
-                self.play(
-                    Flash(eye_group, color=RED, flash_radius=0.35, num_lines=10),
-                    run_time=0.3,
+                    Flash(neuron, color=SPIKE_HOT, flash_radius=0.5, num_lines=14, line_length=0.15),
+                    Flash(eye_group, color=RED, flash_radius=0.35, num_lines=10, line_length=0.12),
+                    run_time=0.55,
                 )
             else:
                 self.play(
                     Transform(gut_fill, new_gut),
                     Transform(membrane_trace, new_trace),
-                    run_time=0.5,
+                    run_time=0.45,
                 )
             v = v_post
 
-        # Beat 1 tail: hold for a beat so audience registers the visual sync.
-        self.wait(0.6)
+        self.wait(0.4)
 
         # ==================================================================
-        # BEAT 2 — Overlay reveal (8-16s)
-        # The two panels are doing the same thing. Punchline text.
+        # BEAT 2 — Punchline in the banner (no scene wipe) (8..14s)
         # ==================================================================
-        # Dim non-essential elements to focus attention.
-        beat2_dims = VGroup(
-            left_label, right_label, code_block, gut_frame, gut_thresh,
-            gut_label, thresh_label,
-        )
-        self.play(
-            beat2_dims.animate.set_opacity(0.15),
-            run_time=0.6,
-        )
-
-        # Punchline lines — small text, three fragments, timed to arrive
-        # like the presenter's beats.
-        punchline_lines = VGroup(
-            Text("same accumulation.", font_size=28, color=WHITE),
-            Text("same threshold.", font_size=28, color=WHITE),
-            Text("same reaction.", font_size=28, color=SPIKE),
-        ).arrange(DOWN, buff=0.25).move_to(ORIGIN).shift(DOWN * 0.4)
-
-        for i, line in enumerate(punchline_lines):
-            self.play(FadeIn(line, shift=UP * 0.15), run_time=0.55)
-            self.wait(0.35 if i < 2 else 0.7)
-
-        # ==================================================================
-        # BEAT 3 — Where the intuition came from (16-25s)
-        # Bridge to clip 2. Show that this neuron's sensitivity came from
-        # exposure to 2680 senior-authored functions.
-        # ==================================================================
-        self.play(
-            FadeOut(punchline_lines),
-            FadeOut(beat2_dims),
-            FadeOut(eye_group),
-            FadeOut(gut_fill),
-            FadeOut(axes),
-            FadeOut(thresh_line),
-            FadeOut(membrane_trace),
-            neuron.animate.move_to(ORIGIN + UP * 0.8).set_stroke(NEURON_C, width=3).set_fill(NEURON_C, opacity=0.15),
-            neuron_label.animate.move_to(ORIGIN + UP * 0.8),
-            run_time=0.9,
-        )
-
-        # A cluster of small "past functions" appear around the neuron, each
-        # flashes in briefly then fades — the training corpus visualized.
-        rng = np.random.default_rng(42)
-        corpus_dots = VGroup()
-        for _ in range(28):
-            r = 2.4 + rng.random() * 0.9
-            theta = rng.random() * 2 * np.pi
-            pos = np.array([r * np.cos(theta), r * np.sin(theta) * 0.55 + 0.4, 0.0])
-            d = Dot(radius=0.05, color=SPIKE).set_opacity(0.0).move_to(pos)
-            corpus_dots.add(d)
-
-        # Fade the corpus in, in a wave, each dot briefly pulses toward the
-        # neuron to convey "the neuron saw this."
-        for k, d in enumerate(corpus_dots):
-            self.play(d.animate.set_opacity(0.9), run_time=0.04)
-        self.wait(0.2)
-
-        exposure_text = Text(
-            "2,680 senior-authored functions",
-            font_size=22, color=DIM,
-        ).move_to(ORIGIN + DOWN * 0.6)
-        self.play(FadeIn(exposure_text), run_time=0.5)
-
-        # Final punchline.
-        final_line = Text(
-            "its intuition came from the same place yours did —",
-            font_size=22, color=WHITE,
-        ).next_to(exposure_text, DOWN, buff=0.4)
-        final_line2 = Text(
-            "reading a lot of code.",
-            font_size=24, color=SPIKE,
-        ).next_to(final_line, DOWN, buff=0.15)
-
-        self.play(FadeIn(final_line), run_time=0.5)
-        self.play(FadeIn(final_line2), run_time=0.5)
+        set_banner("same accumulation. same threshold. same reaction.", SPIKE, run_time=0.55)
         self.wait(1.6)
 
-        # Clean fade to preserve the last frame in the audience's head.
+        # ==================================================================
+        # BEAT 3 — Where the intuition came from (14..22s)
+        # Small yellow "past function" dots stream in from off-frame toward
+        # the neuron. Composition still visible; banner changes.
+        # ==================================================================
+        set_banner("its sensitivity was trained on 2,680 senior-authored functions.", WHITE, run_time=0.5)
+
+        # Corpus dots stream in from the right edge toward the neuron.
+        rng = np.random.default_rng(11)
+        corpus_dots = VGroup()
+        for _ in range(24):
+            # Enter from the right side of the right panel, at random y within safe bounds.
+            enter_y = rng.uniform(-1.8, 3.0)
+            enter_pt = np.array([X_MAX - 0.2, enter_y, 0.0])
+            d = Dot(radius=0.055, color=SPIKE, fill_opacity=0.0).move_to(enter_pt)
+            corpus_dots.add(d)
+        self.add(corpus_dots)
+
+        # Animate them: fade in at entry, drift toward the neuron, fade out.
+        for k, d in enumerate(corpus_dots):
+            neuron_pt = neuron.get_center()
+            # Slight fan-in offset so they don't stack.
+            offset = 0.02 * (k - 12)
+            end_pt = neuron_pt + np.array([offset, offset * 0.3, 0.0])
+            self.play(
+                d.animate.set_opacity(0.85),
+                run_time=0.05,
+            )
+            self.play(
+                d.animate.move_to(end_pt).set_opacity(0.0),
+                run_time=0.15,
+            )
+
+        self.wait(0.4)
+        set_banner('reading a lot of code — same as you.', SPIKE, run_time=0.5)
+
+        self.wait(1.8)
+
+        # Clean fade so the closing frame is crisp.
         self.play(
-            FadeOut(final_line),
-            FadeOut(final_line2),
-            FadeOut(exposure_text),
-            FadeOut(corpus_dots),
-            FadeOut(neuron),
-            FadeOut(neuron_label),
-            run_time=0.8,
+            FadeOut(heading_left), FadeOut(heading_right),
+            FadeOut(code_block), FadeOut(gut_frame), FadeOut(gut_fill),
+            FadeOut(gut_label), FadeOut(eye_group),
+            FadeOut(neuron), FadeOut(neuron_label),
+            FadeOut(axes), FadeOut(thresh_line), FadeOut(thresh_label),
+            FadeOut(membrane_trace),
+            FadeOut(banner_bg), FadeOut(banner_text),
+            run_time=0.6,
         )
 
 
