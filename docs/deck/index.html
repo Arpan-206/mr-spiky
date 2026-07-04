@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mr. Spiky — Intuition Compiler</title>
 
+  <!-- fonts: loaded explicitly so headings and body text render in the -->
+  <!-- same family everywhere, instead of silently falling back to whatever -->
+  <!-- the theme's default heading font happens to be on a given machine. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
   <!-- reveal.js core -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
@@ -20,8 +27,11 @@
 
 <!-- ==== SLIDE 1: HOOK — the pitch, one line + real screenshot ==== -->
 <section data-background-color="#0f0f0f">
-  <div class="hook-wrap">
-    <h1 class="hook-title">Mr. Spiky</h1>
+  <div class="hook-wrap vcenter-inner">
+    <div class="hook-title-row">
+      <span class="mascot"><img src="./assets/mr-spiky.png" alt=""></span>
+      <h1 class="hook-title">Mr. Spiky</h1>
+    </div>
     <p class="hook-sub">an <em>intuition compiler</em> for Python code</p>
     <p class="hook-punch">
       A spiking neural network reviewed this pull request.
@@ -39,16 +49,11 @@
         <span class="dot"></span><span class="dot"></span><span class="dot"></span>
         <span class="pr-fallback-title">Arpan-206/mr-spiky-testbed &nbsp;›&nbsp; PR #4 &nbsp;›&nbsp; src/downloader.py</span>
       </div>
-      <pre class="pr-fallback-body"><strong>Mr. Spiky</strong> — score <code>0.93</code> (top 10% for senior Python code)
-
-This bare <code>except Exception</code> sits three levels deep inside
-a retry loop and swallows all errors without distinguishing between
-transient failures and actual bugs — you're hiding the real problem.
-
-Inside <code>fetch</code> — function-level score <code>0.94</code>
-
-Top axes: <code>exception_surface</code> 1.00,
-<code>complexity</code> 0.93, <code>naming</code> 0.64</pre>
+      <div class="pr-fallback-body">
+        <p><strong>Mr. Spiky</strong> — score <code>0.93</code> (top 10% for senior Python)</p>
+        <p>Bare <code>except Exception</code>, three levels deep inside a retry loop — swallows transient failures and real bugs alike.</p>
+        <p><code>fetch()</code> function score <code>0.94</code> · top axes: <code>exception_surface</code> 1.00, <code>complexity</code> 0.93</p>
+      </div>
     </div>
   </template>
   <aside class="notes">
@@ -63,21 +68,20 @@ Top axes: <code>exception_surface</code> 1.00,
 
 <!-- ==== SLIDE 2: THE PROMPT — Intuition Compiler ==== -->
 <section data-background-color="#0f0f0f">
-  <blockquote class="prompt-quote">
-    Can intuition be translated into something executable?
-  </blockquote>
-  <p class="prompt-source">— hackathon prompt</p>
-
+  <h2 class="section-h">Can intuition be compiled?</h2>
   <div class="fragment prompt-answer">
-    <p>Senior developers read code and their gut fires <em>fast</em>.</p>
-    <p>Not from rules. From <em>pattern</em>. From having read a lot of code.</p>
+    <p>A senior engineer looks at code and just knows something's wrong —
+    before they can say why.</p>
+    <p>That reaction isn't a rule. It's <em>exposure</em>: thousands of hours
+    reading code that shipped.</p>
     <p class="claim">
-      What if we trained a brain-inspired network on senior-written code,
-      and let its neurons tell us when yours looks unusual?
+      Mr. Spiky trains a spiking neural network on ~2,680 functions from
+      CPython, Django, FastAPI, and other reviewed codebases — then checks
+      your code against what its neurons learned to expect.
     </p>
   </div>
   <aside class="notes">
-    Read the prompt aloud. Beat. Then land the claim. This slide is 20 seconds.
+    Read the title aloud. Beat. Then land the claim. This slide is 20 seconds.
   </aside>
 </section>
 
@@ -88,22 +92,21 @@ Top axes: <code>exception_surface</code> 1.00,
   <div class="bio-grid">
     <div class="bio-card fragment">
       <h3>1. LIF neurons</h3>
-      <p><strong>Leaky Integrate-and-Fire.</strong> Membrane potential
-      accumulates from inputs, leaks over time, spikes at threshold.</p>
-      <p class="hint">Same abstraction as a biological neuron. Not a metaphor.</p>
+      <p><strong>Leaky Integrate-and-Fire.</strong> A membrane potential
+      builds from input, leaks over time, and spikes at threshold.</p>
+      <p class="hint">The same mechanism a biological neuron uses — not a metaphor for it.</p>
     </div>
     <div class="bio-card fragment">
       <h3>2. STDP</h3>
-      <p><strong>Spike-Timing-Dependent Plasticity.</strong> "Neurons
-      that fire together wire together" — weighted by <em>when</em>
-      they fired.</p>
-      <p class="hint">The learning rule your brain uses. Trained the SNN unsupervised.</p>
+      <p><strong>Spike-Timing-Dependent Plasticity.</strong> Connections
+      that fire in the right order strengthen; the wrong order, weaken.</p>
+      <p class="hint">No gradients, no labels — trained the SNN unsupervised on senior code.</p>
     </div>
     <div class="bio-card fragment">
       <h3>3. Temporal streaming</h3>
-      <p>The SNN reads your function <strong>line by line</strong>,
-      one line = one timestep. Neuron state carries across lines.</p>
-      <p class="hint">Just like a reviewer whose gut fires at line 47 because of what they read through line 46.</p>
+      <p>The SNN reads a function <strong>line by line</strong>,
+      one line per timestep, carrying neuron state forward.</p>
+      <p class="hint">Like a reviewer whose gut reacts at line 47 because of what they read on line 46.</p>
     </div>
   </div>
   <aside class="notes">
@@ -291,9 +294,10 @@ Top axes: <code>exception_surface</code> 1.00,
     </tr>
   </table>
   <p class="val-caption fragment">
-    Structural features <em>cannot</em> see semantic bugs.
-    <br>We report that honestly. This isn't a bug detector.
-    It's an <em>intuition</em> detector.
+    AST-structural features <em>cannot</em> see semantic bugs — the PyResBugs
+    row is the honest proof, not a hidden footnote.
+    <br>What they catch cleanly is structural complexity, exactly what the
+    other three rows measure.
   </p>
   <aside class="notes">
     "Most projects would bury this row. We put it in the JSON output.
@@ -343,23 +347,28 @@ Top axes: <code>exception_surface</code> 1.00,
 
 <!-- ==== SLIDE 10: THE CLOSE ==== -->
 <section data-background-color="#0f0f0f">
-  <h1 class="close-title">Mr. Spiky</h1>
-  <p class="close-tagline">Encoding senior intuition with the same computational primitives your brain uses.</p>
+  <div class="vcenter-inner">
+  <div class="close-title-row">
+    <span class="mascot"><img src="./assets/mr-spiky.png" alt=""></span>
+    <h1 class="close-title">Mr. Spiky</h1>
+  </div>
+  <p class="close-tagline">An intuition compiler for Python, built on LIF neurons and STDP.</p>
   <div class="close-links">
     <div>
       <div class="close-label">Repo</div>
-      <div><code>github.com/Arpan-206/mr-spiky</code></div>
+      <div><code>github.com/Arpan-206<br>&#8203;/mr-spiky</code></div>
     </div>
     <div>
       <div class="close-label">Live testbed</div>
-      <div><code>github.com/Arpan-206/mr-spiky-testbed</code></div>
+      <div><code>github.com/Arpan-206<br>&#8203;/mr-spiky-testbed</code></div>
     </div>
     <div>
       <div class="close-label">Docker</div>
-      <div><code>ghcr.io/arpan-206/mr-spiky:latest</code></div>
+      <div><code>ghcr.io/arpan-206<br>&#8203;/mr-spiky:latest</code></div>
     </div>
   </div>
   <p class="close-thanks">Thanks. Questions?</p>
+  </div>
   <aside class="notes">
     Pause. Let people write down the URLs. Wait for the first question.
     If nobody speaks up in 5 seconds: "Happy to dive into any layer —
@@ -378,11 +387,14 @@ Top axes: <code>exception_surface</code> 1.00,
 <script>
   Reveal.initialize({
     hash: true,
+    width: 1280,
+    height: 720,
+    margin: 0,
     transition: 'fade',
     transitionSpeed: 'fast',
     controls: true,
     progress: true,
-    center: true,
+    center: false,
     plugins: [ RevealHighlight, RevealNotes ],
   });
 </script>
