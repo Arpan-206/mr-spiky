@@ -77,18 +77,21 @@ class LIFMembraneOverLines(Scene):
         rest_v = 0.0
 
         # ---- Code panel (left) --------------------------------------------
+        # Manim 0.19+ renamed `code=` to `code_string=`. Keeping the older
+        # name here would 400 on newer installs.
         code_block = Code(
-            code="\n".join(code_lines),
+            code_string="\n".join(code_lines),
             language="python",
             background="window",
             tab_width=4,
-            font="Monospace",
-            style="monokai",
+            formatter_style="monokai",
         ).scale(0.6)
         code_block.to_edge(LEFT, buff=0.6).shift(UP * 0.2)
 
         # Hide code lines initially; we reveal them one at a time.
-        code_line_mobs = list(code_block.code)
+        # In Manim 0.19+ the highlighted lines live on `.code_lines`
+        # (was `.code` in 0.18 and earlier).
+        code_line_mobs = list(code_block.code_lines)
         for line in code_line_mobs:
             line.set_opacity(0.15)
 

@@ -28,7 +28,6 @@ from manim import (
     Circle,
     Arrow,
     Text,
-    MathTex,
     Line,
     DashedLine,
     Dot,
@@ -99,7 +98,9 @@ class STDPLearningRule(Scene):
             )
 
         arrow = make_arrow(6.0)
-        w_label = MathTex("w", font_size=32, color=WHITE)
+        # Text instead of MathTex — avoids requiring a system LaTeX install.
+        # A single-character italic-ish "w" reads fine at this size.
+        w_label = Text("w", font_size=32, color=WHITE, slant="ITALIC")
         w_label.next_to(arrow, UP, buff=0.15)
 
         title = Text("STDP: spike-timing-dependent plasticity", font_size=26, color=GRAY)
@@ -175,14 +176,14 @@ class STDPLearningRule(Scene):
             stroke_width=2,
             dash_length=0.08,
         )
-        dt_label = MathTex(r"\Delta t", font_size=26, color=GRAY)
+        dt_label = Text("Δt", font_size=26, color=GRAY)
         dt_label.next_to(dt_line, DOWN, buff=0.05)
 
         self.play(Create(dt_line), FadeIn(dt_label), run_time=0.3)
 
         # Thicken arrow: w increases.
         arrow_thick = make_arrow(12.0).set_color(GREEN)
-        dw_pos = MathTex(r"\Delta w > 0", font_size=28, color=GREEN)
+        dw_pos = Text("Δw > 0", font_size=28, color=GREEN)
         dw_pos.next_to(arrow_thick, UP, buff=0.35)
 
         self.play(
@@ -251,7 +252,7 @@ class STDPLearningRule(Scene):
 
         # Thin arrow: w decreases.
         arrow_thin = make_arrow(3.0).set_color(RED)
-        dw_neg = MathTex(r"\Delta w < 0", font_size=28, color=RED)
+        dw_neg = Text("Δw < 0", font_size=28, color=RED)
         dw_neg.next_to(arrow_thin, UP, buff=0.35)
 
         self.play(
