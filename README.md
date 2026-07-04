@@ -11,28 +11,80 @@ review at organizations with strong review culture. At inference the SNN reads
 your code line-by-line as a temporal stream and fires on lines that light up
 neurons which are usually quiet on senior-approved code.
 
-Feature vectors are ZCA-whitened against the training corpus before entering
-the SNN so its 128 hidden neurons see 9 orthogonal input dimensions instead of
-~4 tangled ones — that fix alone broke the SNN out of a 2-cluster collapse
-(neurons converged to only 2 distinct baseline firing rates) into typically
-10–17 distinct baselines, and lifted CodeComplex balanced accuracy from 58%
-to 70%.
+**Two ways to use it:**
 
-## What it does
+- **HTTP API** — `POST /analyze` with `{code, language}` returns per-line
+  scores plus a multi-axis reasoning breakdown. Ship as a docker container,
+  wire up to a frontend, done.
+- **GitHub PR review bot** — a reusable Actions workflow that comments on
+  structurally-unusual lines a pull request adds. See [PR review
+  bot](#pr-review-bot) below, or [`docs/GITHUB_ACTION.md`][ga] for adoption
+  in another repo.
 
-Given Python source, `POST /analyze` (body: `{code, language}`) returns per-line
-scores plus a multi-axis breakdown that explains *why* the SNN flagged
-something.
+[ga]: docs/GITHUB_ACTION.md
 
-## API reference (frontend integration)
+---
+
+## Contents
+
+- [What it detects (and honestly doesn't)](#what-it-detects-and-honestly-doesnt)
+- [Setup + Run](#setup--run)
+- [HTTP API for a frontend](#http-api-for-a-frontend)
+- [PR review bot](#pr-review-bot)
+- [Architecture](#architecture)
+- [Validation](#validation)
+- [Why an SNN?](#why-an-snn)
+
+## What it detects (and honestly doesn't)
+
+**Detects:** structurally unusual code relative to senior Python. Deep
+nesting, high cyclomatic complexity, dense use-def chains, heavy call-graph
+delegation, unusual identifier density, syntax errors, exception-handling
+pressure. The kinds of things a reviewer circles in a PR.
+
+**Doesn't detect:** semantic bugs. Mr. Spiky can't tell `x = y` from `x == y`
+at the logic level — the AST features are structural, not semantic. This is
+validated honestly: on PyResBugs (4000 real buggy/fixed Python pairs), it
+performs at 50.2% balanced accuracy, chance. That negative result is
+recorded in `models/threshold.json` and shown here, not swept aside.
+
+## Setup + Run
+
+Requires [`uv`](https://docs.astral.sh/uv/) and [`just`](https://just.systems/).
+Python 3.12 (torch/snntorch don't ship 3.13+ wheels).
+
+```bash
+uv sync
+```
+
+```bash
+just api            # FastAPI on :8000 (mock mode until weights are trained)
+just smoke          # POST a sample snippet to the running API
+just test           # pytest — 14 tests
+
+just data-pretrain  # download senior corpus (~30s–3min, 149 files, ~2MB)
+just data-calib     # download PyResBugs + CodeComplex + mine annotations
+just train          # fit whitening → STDP pretraining
+just calibrate      # baselines + ECDF + threshold
+just all            # data + train + calibrate end-to-end
+
+just docker-build   # multi-stage build with CPU-only torch (~350MB image)
+just docker-run     # run at :8000
+
+just review-pr owner/repo 42   # score any open PR locally (uses `gh` auth)
+just release-models            # tar the trained artifacts for `gh release upload`
+```
+
+Local dev helpers (system-Python, gitignored) live under `.temp/`. See
+`.temp/README.md` if you want pretty-printed API output.
+
+## HTTP API for a frontend
 
 ### Endpoints
 
 - `POST /analyze` — body `{code: string, language: "python"}`. Non-Python
   languages return HTTP 400.
-- `GET /health` — returns backend status plus a `mode` flag so the frontend
-  can tell whether the trained SNN is loaded or the server is running in
-  the linear-scoring fallback:
+- `GET /health` — status + mode diagnostics so the frontend can gate features:
 
   ```json
   {
@@ -42,22 +94,23 @@ something.
     "threshold": 0.9,
     "hidden_size": 128,
     "output_size": 32,
-    "hidden_baselines_distinct": 17,
+    "hidden_baselines_distinct": 21,
     "ecdf_reference_size": 39942
   }
   ```
 
-  When `mode == "mock"` the payload contains `mode`, `threshold`, and a
-  `reason` string explaining why (missing weights file). Use this to show a
-  "running against mock scores — retrain to enable" banner on the frontend
-  instead of silently presenting weaker output. Also handy for the
-  language-selector gate: read `supported_languages` from the same call.
+  When `mode == "mock"` the payload has `mode`, `threshold` (0.55 in mock),
+  and a `reason` string explaining why. Use it to render a "running against
+  mock scores" banner instead of silently presenting weaker output.
+
+CORS is enabled for `http://localhost:3000` and
+`https://mr-spiky.crnicholson.com` — edit `src/api.py::app.add_middleware`
+to add your own frontend origin.
 
 ### Response shape
 
 Two line shapes: **flagged** lines carry extra reasoning fields (`reason`,
-`context`, `raw_features`); **unflagged** lines stay lean to keep long-file
-responses small.
+`context`, `raw_features`); **unflagged** lines stay lean.
 
 Flagged line (all fields present):
 
@@ -71,7 +124,8 @@ Flagged line (all fields present):
     "tangled_state": 1.0,
     "hidden_calls": 1.0,
     "exception_surface": 0.0,
-    "naming": 0.97
+    "naming": 0.97,
+    "malformed": 0.0
   },
   "reason": "high on complexity (1.00) + tangled_state (1.00) — deeply nested / branchy control flow; variables reach across long distances",
   "context": {
@@ -83,7 +137,8 @@ Flagged line (all fields present):
     "nesting_depth": 1.0, "length": 0.1, "token_entropy": 0.59,
     "naming_entropy": 0.77, "cyclomatic_proxy": 0.55,
     "use_def_distance": 1.0, "name_flow": 0.33,
-    "call_graph_shape": 1.0, "exception_density": 0.0
+    "call_graph_shape": 1.0, "exception_density": 0.0,
+    "parse_error": 0.0
   }
 }
 ```
@@ -100,13 +155,13 @@ Unflagged line (lean shape):
     "tangled_state": 0.3,
     "hidden_calls": 0.1,
     "exception_surface": 0.0,
-    "naming": 0.62
+    "naming": 0.62,
+    "malformed": 0.0
   }
 }
 ```
 
-Top-level response envelope (fields wrap the `lines` array; each entry follows
-one of the two shapes above):
+Top-level envelope:
 
 ```json
 {
@@ -121,50 +176,120 @@ one of the two shapes above):
 
 | Field | Type | Rendering suggestion |
 | :-- | :-- | :-- |
-| `verdict` | string | Banner at top of the result panel. Already includes the dominant axis, no extra formatting needed. |
-| `dominant_axis` | string \| null | If not null, highlight this axis on your per-line axis chart so the user knows what the SNN is objecting to *overall*. |
-| `top_flagged` | list<int> | Line numbers, worst first. Perfect for a "jump to next hot line" button or a table of contents. |
+| `verdict` | string | Banner at top of the result panel. Already includes the dominant axis. |
+| `dominant_axis` | string \| null | Highlight this axis on your per-line axis chart so the user sees what the SNN is objecting to overall. |
+| `top_flagged` | list<int> | Line numbers, worst first. Great for a "jump to next hot line" button. |
 | `lines[i].line` | int (1-based) | Match to your source line numbering. |
-| `lines[i].score` | float ∈ [0,1] | The main scalar. Interpret as *percentile rank against senior code*: `0.9` = "top 10% most unusual line vs Django/CPython/etc." Great for background-color intensity. |
-| `lines[i].flag` | bool | Whether `score ≥ threshold`. Read the exact threshold from `/health` (0.9 in SNN mode, 0.55 in mock mode). Use for the gutter marker / underline. |
-| `lines[i].axes` | dict<string, float> | Five axes, each ∈ [0,1] roughly (may briefly exceed 1.0 by ~5%). Radar chart or horizontal-bar breakdown per line. See the axis glossary below. |
+| `lines[i].score` | float ∈ [0,1] | Percentile rank against senior code. `0.9` = "top 10% most unusual line vs Django/CPython/etc." Great for background-color intensity. |
+| `lines[i].flag` | bool | Whether `score ≥ threshold`. Threshold varies by mode — read it from `/health`. Use for the gutter marker / underline. |
+| `lines[i].axes` | dict<string, float> | Six axes, each ∈ [0,1] (may briefly exceed by ~5%). Radar chart or horizontal-bar breakdown per line. See axis glossary. |
 | `lines[i].reason` | string *(flagged only)* | Ready-to-display tooltip / hover text. Reads like reviewer feedback. |
-| `lines[i].context` | object *(flagged only)* | `{function, span: [start, end], function_score}`. `function_score` is the SNN's score for the *enclosing function as a whole* — useful to show "this line is inside a function that's also gnarly," or to fold flagged lines by function. |
-| `lines[i].raw_features` | dict<string, float> *(flagged only)* | The 9 normalized inputs. Only bother rendering if you want a debug/expert view — the axes are what humans read. |
+| `lines[i].context` | object *(flagged only)* | `{function, span: [start, end], function_score}`. `function_score` is the SNN's score for the enclosing function — great for "this line sits inside a function that's *also* gnarly." |
+| `lines[i].raw_features` | dict<string, float> *(flagged only)* | The 10 normalized inputs. Only render if you want a debug/expert view; the axes are what humans read. |
 
-### Axis glossary (for tooltips / legends)
+### Axis glossary
 
-Each axis is a normalized 0-to-1 signal derived from the AST features that
-went into the SNN. Same feature can contribute to multiple axes.
+Each axis is derived from a subset of the 10 input features. A single
+feature can contribute to multiple axes.
 
 | Axis | Plain-English meaning | Features that drive it |
 | :-- | :-- | :-- |
 | **complexity** | Deeply nested / branchy control flow. | `nesting_depth`, `cyclomatic_proxy`, `length` |
-| **tangled_state** | Variables reach across long distances; the line pulls in many named things at once. | `use_def_distance`, `name_flow` |
-| **hidden_calls** | Delegates to opaque calls (user-defined, non-stdlib). Reviewer would ask "what does that function do?" | `call_graph_shape` |
+| **tangled_state** | Variables reach across long distances; line pulls in many names at once. | `use_def_distance`, `name_flow` |
+| **hidden_calls** | Delegates to opaque calls (user-defined, non-stdlib). | `call_graph_shape` |
 | **exception_surface** | Try/except/raise density is high for the scope. | `exception_density` |
-| **naming** | Unusual identifier density (many distinct names or unusual character distribution). Not always bad — flags very information-dense lines. | `token_entropy`, `naming_entropy` |
+| **naming** | Unusual identifier density. Not always bad — flags information-dense lines. | `token_entropy`, `naming_entropy` |
+| **malformed** | Line doesn't parse as valid Python. Dedicated channel — forces a flag regardless of SNN score. | `parse_error` |
 
-### Score interpretation cheat-sheet
+### Score cheat-sheet
 
 - `score < 0.5` — comfortably normal for senior code. Don't draw attention.
-- `0.5 ≤ score < 0.7` — moderately unusual. Consider a subtle marker (light
-  color) but no flag.
-- `0.7 ≤ score < 0.9` — noticeably above senior baseline. Not flagged by
-  default but a "warm" line. Good for hover tooltips only.
-- `score ≥ 0.9` — flagged. Renders with `flag: true` and includes `reason`,
-  `context`, and `raw_features`. Show prominently.
+- `0.5 ≤ score < 0.7` — moderately unusual. Consider a subtle marker.
+- `0.7 ≤ score < 0.9` — noticeably above senior baseline. "Warm" line;
+  tooltip only, no flag.
+- `score ≥ 0.9` — flagged. Comes with `reason`, `context`, `raw_features`.
+  Show prominently.
+- `score = 1.0` on a `malformed`-axis line — forced by parse-error override.
+  Always flagged in both SNN and mock modes.
 
 ### Empty / error states
 
-- Blank input → `{verdict: "no suspicious spikes detected", lines: [], top_flagged: [], dominant_axis: null}`. Render a neutral "nothing to analyze" state.
-- Python syntax error → same shape, empty `lines`. **Don't** show an error banner — the tool just returned nothing to flag. Show your own parser feedback if you have one.
-- Non-Python language → HTTP 400 with `detail: "language 'X' not supported. Mr. Spiky's AST features are Python-only. Supported: ['python']"`. Surface as an error toast; disable the analyze button until the user switches back to Python.
-- Mock mode (no trained weights on the backend) → same `/analyze` response schema, scores derived from a linear combination of raw features. Detect it by checking `mode` in the `/health` response (`"snn"` vs `"mock"`) — the mock payload also carries a `reason` string you can surface directly. In mock mode the flag threshold is 0.55 (not 0.9) and the axes are the same but reflect only what the AST-feature linear scoring saw.
+- **Blank input** → `{verdict: "no suspicious spikes detected", lines: [], top_flagged: [], dominant_axis: null}`. Render a neutral state.
+- **Python syntax error inside a snippet** → the offending line is scored
+  and gets `axes.malformed = 1.0`. Its `flag` is set to `true` regardless
+  of SNN score. Other lines score normally.
+- **Non-Python language** → HTTP 400 with `detail` naming the unsupported
+  language. Surface as an error toast; disable the analyze button.
+- **Mock mode** → same `/analyze` schema. Detect via `/health.mode == "mock"`
+  and show a banner. Threshold drops to 0.55 in this path; scores use a
+  hand-picked linear combination of raw features.
+
+## PR review bot
+
+Mr. Spiky runs as a reusable GitHub Actions workflow that reviews any pull
+request against your default branch. It posts:
+
+1. A **summary comment** at the top of the PR with a table of flagged lines.
+2. **Inline review comments** on the top-N most-flagged lines, each with
+   the axis breakdown, reason, and enclosing-function context.
+
+### Adopt in your repo
+
+Drop this into `.github/workflows/mr-spiky-review.yml`:
+
+```yaml
+name: Mr. Spiky review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    uses: Arpan-206/mr-spiky/.github/workflows/mr-spiky-review.yml@main
+    with:
+      min_score: 0.95      # threshold to comment on a line (default 0.95)
+      max_comments: 5      # hard cap on comments per PR (default 5)
+```
+
+That's the whole integration. No secrets, no server. The workflow uses
+`GITHUB_TOKEN` to post reviews via the GitHub API. See
+[`docs/GITHUB_ACTION.md`][ga] for a full reference including the Docker
+variant, release-pinning, and troubleshooting.
+
+### Live demo — Arpan-206/mr-spiky-testbed
+
+A minimal test repo lives at
+[Arpan-206/mr-spiky-testbed](https://github.com/Arpan-206/mr-spiky-testbed).
+[PR #1](https://github.com/Arpan-206/mr-spiky-testbed/pull/1) intentionally
+mixes clean code (a `batched` iterator) with gnarly code (a `parse_config`
+function with mutable state, nested `if/else`, and cross-cutting `strict`
+flags). The bot correctly:
+
+- Stayed silent on `src/batch.py` (0 comments).
+- Flagged 3 lines inside `parse_config` (scores 0.95–0.96).
+- Cited the enclosing function's score (0.96) in every comment.
+
+Look at the actual PR review to see what the output looks like in
+practice.
+
+### Local dry runs (no comments posted)
+
+```bash
+just review-pr owner/repo 42
+```
+
+Reads your `gh` auth, fetches the diff, scores it, prints the same summary
+and inline bodies to stdout. Good for tuning `--min-score` before enabling
+the bot on a real repo.
 
 ## Architecture
 
-**1. Pretrain (unsupervised STDP)** — 2 layer LIF SNN with 9 input dims →
+**1. Pretrain (unsupervised STDP)** — 2-layer LIF SNN with 10 input dims →
 **128** hidden → **32** output. Depression-dominated multiplicative STDP with
 weight decay prevents saturation. Trained on 2680 functions from
 `data/senior_corpus.json` (auto-fetched from 10 respected Python repos, 149
@@ -176,99 +301,75 @@ features. Raw features are heavily correlated on real Python (e.g. `length` ↔
 `token_entropy` at r=0.84, `cyclomatic_proxy` ↔ `call_graph_shape` at r=0.92),
 so without whitening the SNN saw only ~4 truly independent dimensions and
 collapsed 128 neurons into 2 clusters. With whitening the same corpus
-produces 10–17 distinct neuron baselines per training run — real
+produces **~15–20 distinct neuron baselines** per training run — real
 specialization. Live count exposed as `hidden_baselines_distinct` in
 `/health`.
 
 **3. Calibrate** — feed the training corpus through the trained SNN in
 sequence mode (each line = one timestep, membranes carry across lines) and
 compute:
+
 - **Per-neuron baseline** firing rates (what "normal" looks like per neuron).
 - **ECDF over corpus scores** (turns raw SNN output into a percentile rank).
 - **Anomaly threshold** at p90 = top-10%-most-unusual for senior code.
 
 **4. Infer** — for new code:
+
 1. Extract per-line features (skipping docstrings and imports).
 2. Whiten with the calibrated transform.
 3. Run through the SNN as a temporal sequence.
 4. Score each line by *continuous membrane activation excess over the
    per-neuron baseline* — not binary spike output. Continuous membranes are
-   what makes per-line scores smooth instead of collapsing to 4-5 discrete
+   what makes per-line scores smooth instead of collapsing to a few discrete
    values.
 5. ECDF-rescale so the score is a percentile rank vs senior code.
+6. **parse_error override**: any line where `ast.parse` chokes gets
+   `score=1.0` and `axes.malformed=1.0` regardless of SNN output — the SNN
+   can't have learned to react to parse errors since they're absent from
+   senior training code.
 
-## Validation (recorded in `models/threshold.json`)
+### The 10 features
 
-Three labeled datasets, ordered by relevance to the pitch:
+`nesting_depth`, `length`, `token_entropy`, `naming_entropy`,
+`cyclomatic_proxy`, `use_def_distance`, `name_flow`, `call_graph_shape`,
+`exception_density`, `parse_error`. Full definitions in
+`src/features.py`. `parse_error` is dead (0.0) across the entire training
+corpus by definition (senior code parses), so it's inert during STDP and
+whitening — but at inference it becomes the SNN's dedicated "this doesn't
+even compile" channel.
 
-| Dataset | n | What it measures | Balanced accuracy (optimal) | Mean-score gap (positive − negative) |
-| :-- | --: | :-- | --: | --: |
-| **Annotations** (`# noqa`, `# type: ignore`, `# pragma: no cover` from the same senior repos) | 596 | **Real senior judgments** — lines seniors themselves marked as exceptions | **67.4%** | +0.253 |
-| **CodeComplex** (Codeforces Python, 7 algorithmic-complexity classes) | 4900 | Algorithmic complexity | **70.1%** | +0.271 |
-| **PyResBugs** (buggy vs fixed Python pairs from real CVEs) | 4000 | Semantic bugs | 50.0% (chance, by design) | −0.013 |
-
-The PyResBugs result is a **feature, not a bug**: AST-structural features can't
-see semantic bugs, and the tool honestly reports that. What the SNN *does*
-catch is what it claims — the tangled, deeply-nested, high-delegation lines
-that seniors would circle in review.
-
-STDP training is stochastic, so the trained SNN produces **10–17 distinct
-per-neuron baselines** across the 128 hidden units on repeated runs — the
-important thing is that it stably clears the ~2-cluster degenerate case that
-un-whitened training got stuck in. Live diagnostics available at `/health`.
-
-## Setup
-
-Requires [`uv`](https://docs.astral.sh/uv/) and [`just`](https://just.systems/).
-Python 3.12 (torch/snntorch don't ship 3.13+ wheels).
-
-```bash
-uv sync
-```
-
-## Run
-
-```bash
-just api            # FastAPI on :8000 (mock mode until weights are trained)
-just smoke          # POST a sample snippet to the running API
-just test           # pytest — 9 tests
-
-just data-pretrain  # download senior corpus (~30s, 149 files, ~2MB)
-just data-calib     # download PyResBugs + CodeComplex + mine annotations
-just train          # fit whitening → STDP pretraining → models/whitening.pt + snn_weights.pt
-just calibrate      # baselines + ECDF + threshold → models/threshold.json + snn_baselines.pt + snn_ecdf.pt
-just all            # data + train + calibrate end-to-end
-
-just docker-build   # multi-stage build with CPU-only torch (~350MB image)
-just docker-run     # run at :8000
-```
-
-The API accepts `{code, language}`; non-Python languages return 400 (the
-AST features are Python-only).
-
-## Mock mode
+### Mock mode
 
 Until `models/snn_weights.pt` exists, `infer.py` falls back to scoring lines
-directly from normalized AST features via a hand-picked linear combination.
-The API stays up and returns the same `/analyze` schema (same fields, same
-axes, same reason strings on flagged lines), and `/health` reports
-`mode: "mock"` plus a `reason` field so the frontend can render a banner or
-disable confidence badges. A warning is also logged server-side on each
-request. This lets a frontend integrate against a live API before training
-completes.
+from a hand-picked linear combination of the 10 raw features. The API stays
+up and returns the same `/analyze` schema (same fields, same axes, same
+reason strings on flagged lines). `/health` reports `mode: "mock"` plus a
+`reason` field so the frontend can render a banner. A warning is also
+logged server-side on each request. This lets a frontend integrate against
+a live API before training completes; the PR-review workflow uses the same
+fallback if it can't download a release asset.
 
-## PR review bot
+## Validation
 
-Mr. Spiky can also run as a GitHub Action that reviews pull requests. It
-comments inline on structurally-unusual lines the PR added or modified, with
-reasoning ("high on complexity + hidden_calls — deeply nested / branchy
-control flow") and a summary of what changed at the top of the PR.
+Recorded in `models/threshold.json`. Three labeled datasets, ordered by
+relevance to the pitch:
 
-See [`docs/GITHUB_ACTION.md`](docs/GITHUB_ACTION.md) for how to adopt the
-workflow in another repo (it's a two-line copy-paste). For local dry runs
-against any PR: `just review-pr owner/repo 42`. Uses a stricter threshold
-than the interactive API (default 0.95) and caps comments per PR (default 5)
-so the bot stays signal-heavy.
+| Dataset | n | What it measures | Balanced accuracy (optimal) | Mean-score gap |
+| :-- | --: | :-- | --: | --: |
+| **Annotations** (`# noqa`, `# type: ignore`, `# pragma: no cover` from the same senior repos) | 596 | **Real senior judgments** — lines seniors themselves marked as exceptions | **67.4%** | +0.253 |
+| **CodeComplex** (Codeforces Python, 7 algorithmic-complexity classes) | 4900 | Algorithmic complexity | **68.8%** | +0.276 |
+| **PyResBugs** (buggy vs fixed Python pairs from real CVEs) | 4000 | Semantic bugs | 50.2% (chance, by design) | −0.009 |
+
+The PyResBugs result is a **feature, not a bug**: AST-structural features
+can't see semantic bugs, and the tool honestly reports that. What the SNN
+*does* catch is what it claims — the tangled, deeply-nested,
+high-delegation lines that seniors would circle in review.
+
+STDP training is stochastic, so the trained SNN produces roughly **15–21
+distinct per-neuron baselines** across the 128 hidden units on repeated
+runs. The important thing is that it stably clears the ~2-cluster
+degenerate case that un-whitened training got stuck in. Live diagnostics
+available at `/health`.
 
 ## Why an SNN?
 
@@ -280,5 +381,5 @@ function's lines as a temporal stream into the SNN and reading per-line
 membrane state gives us context-dependent per-line scores that neither a
 per-line MLP nor an average over rate-coded spikes can produce cleanly.
 
-The temporal architecture is what earns the "intuition" framing. STDP on the
-senior corpus is what gives the SNN *whose* intuition.
+The temporal architecture is what earns the "intuition" framing. STDP on
+the senior corpus is what gives the SNN *whose* intuition.
