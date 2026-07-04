@@ -1,19 +1,22 @@
 """
-Mr. Spiky pitch clip 1: "A neuron reads code the way you do." (~22s)
+Mr. Spiky pitch clip 1: "A neuron reads real senior code, and reacts like
+your brain does." (~32s)
 
-DESIGN RULES (do not break):
-  - The composition stays visible for the entire clip. No cuts to blank
-    scenes. Punchlines land in a bottom banner strip, they don't replace
-    the visual.
-  - Every mobject must sit inside safe bounds:
-        x in [-6.8, 6.8]
-        y in [-3.8, 3.8]
-    Manim's default frame is 14.222 wide × 8.0 tall (aspect 16:9), so
-    those bounds leave ~0.3 units of safety. Wide Text is bounded by
-    calling .set(width=W) after construction.
-  - The reviewer's eye and the neuron's membrane trace rise in visible
-    sync. That's the whole point of the clip. Break the sync, break
-    the claim.
+The code is a real, mildly-simplified version of `linecache.checkcache`
+from the CPython stdlib — chosen because it has a natural "reviewer
+flinch" moment: a bare `try/except (OSError, ValueError)` that silently
+mutates a module-level cache. The eye scans top-to-bottom, the membrane
+accumulates, and both the reviewer marker (❗) and the neuron spike land
+on that specific line at the same moment.
+
+DESIGN RULES:
+  - Composition stays visible for the whole clip. Bottom banner strip
+    handles all narration changes.
+  - Every mobject inside safe bounds x∈[-6.8, 6.8], y∈[-3.8, 3.8].
+  - Eye + membrane rise in visible sync. Break sync, break claim.
+  - The specific line that spikes (line index 8 — the bare except) is
+    the ONLY line that pushes membrane over threshold. Earlier lines
+    accumulate meaningfully but stay sub-threshold.
 
 Render: manim -qm lif_membrane_over_lines.py LIFMembraneOverLines
 """
@@ -29,8 +32,7 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Safe frame bounds. Manim's default frame is 14.222 × 8.0. Constrain to a
-# rectangle 0.3 units inside that on every side so text never clips.
+# Safe frame bounds. Default 14.222 × 8.0, safety margin 0.3 all around.
 # ---------------------------------------------------------------------------
 X_MAX =  6.8
 X_MIN = -6.8
@@ -44,39 +46,66 @@ NEURON_C  = "#ffd54a"
 EYE_C     = "#7fd6ff"
 LINE_MID  = "#3a3a3f"
 DIM       = "#8a8a92"
+FLINCH    = "#ff6b6b"
 
-# Text that could get wide is bounded by .set(width=...) after construction.
-MAX_HEADING_W = 5.4    # each panel is ~6.5 wide with 0.5 buff, so 5.4 fits comfortably
-MAX_BANNER_W  = 12.0   # the bottom banner spans most of the frame
+MAX_BANNER_W = 12.0
 
 
+# ---------------------------------------------------------------------------
+# Real code: simplified linecache.checkcache from the CPython stdlib.
+# 12 lines. The bare `except (OSError, ValueError)` and silent
+# `cache.pop(...)` on that path is what a senior reviewer flinches at.
+# ---------------------------------------------------------------------------
 CODE_LINES = [
-    "def process(items):",
-    "    result = []",
-    "    for item in items:",
-    "        if item.valid and item.score > threshold:",
+    "def checkcache(filename=None):",
+    "    if filename is None:",
+    "        filenames = cache.copy().keys()",
+    "    else:",
+    "        filenames = [filename]",
+    "    for filename in filenames:",
+    "        entry = cache.get(filename)",
+    "        if entry is None or len(entry) == 1:",
+    "            continue",
+    "        size, mtime, lines, fullname = entry",
+    "        try:",
+    "            stat = os.stat(fullname)",
+    "        except (OSError, ValueError):",
+    "            cache.pop(filename, None)",
 ]
 
-# Per-line "structural intensity." Only the last line pushes the membrane
-# over threshold. Earlier lines contribute meaningful sub-threshold
-# accumulation so the "context builds up" story reads.
-BUMPS   = [0.22, 0.18, 0.38, 0.62]
-LEAK    = 0.78    # fraction retained between line inputs
+# Per-line "structural intensity." Only the bare-except line
+# (index 12) crosses threshold. Earlier lines accumulate meaningfully.
+# 14 values, one per line.
+BUMPS = [
+    0.05,  # def signature
+    0.12,  # if filename is None:
+    0.16,  # cache.copy().keys() — mutates external state
+    0.08,  # else
+    0.08,  # filenames = [filename]
+    0.14,  # for loop
+    0.18,  # entry = cache.get(...) — accesses global cache
+    0.20,  # compound condition
+    0.06,  # continue (leaks a bit)
+    0.14,  # unpack tuple
+    0.10,  # try:
+    0.12,  # os.stat(...)
+    0.62,  # except (OSError, ValueError): ← THIS is the flinch line
+    0.30,  # cache.pop — silent mutation on error path
+]
+
+LEAK    = 0.85    # keep more between lines so context builds visibly
 THRESH  = 1.00
 
 
-def clamp_to_frame(mob):
-    """Assert helper — verify a mobject stays inside safe bounds after we
-    place it. Runs at construct time so a bad placement fails loudly
-    instead of silently clipping in the rendered mp4."""
+def clamp_to_frame(mob, name=""):
     left, right, top, bot = (
         mob.get_left()[0], mob.get_right()[0],
         mob.get_top()[1],  mob.get_bottom()[1],
     )
-    assert left  >= X_MIN - 0.05, f"{mob} clips left  ({left:.2f} < {X_MIN})"
-    assert right <= X_MAX + 0.05, f"{mob} clips right ({right:.2f} > {X_MAX})"
-    assert top   <= Y_MAX + 0.05, f"{mob} clips top   ({top:.2f} > {Y_MAX})"
-    assert bot   >= Y_MIN - 0.05, f"{mob} clips bot   ({bot:.2f} < {Y_MIN})"
+    assert left  >= X_MIN - 0.05, f"{name or mob} clips left  ({left:.2f})"
+    assert right <= X_MAX + 0.05, f"{name or mob} clips right ({right:.2f})"
+    assert top   <= Y_MAX + 0.05, f"{name or mob} clips top   ({top:.2f})"
+    assert bot   >= Y_MIN - 0.05, f"{name or mob} clips bot   ({bot:.2f})"
 
 
 class LIFMembraneOverLines(Scene):
@@ -84,32 +113,26 @@ class LIFMembraneOverLines(Scene):
         self.camera.background_color = BG
 
         # ==================================================================
-        # LAYOUT — Fixed regions, computed once, honored for the whole clip.
+        # LAYOUT
         # ==================================================================
-        # Bottom banner strip lives at y in [-3.6, -2.8]. Everything else
-        # lives above y = -2.6 so the banner never overlaps the composition.
+        LEFT_CX  = -3.6     # left panel center x — code is wide, sits left
+        RIGHT_CX =  3.6     # right panel center x — neuron + axes on right
         BANNER_Y = -3.2
 
-        # Left panel occupies x in [-6.6, -0.2]; right panel x in [0.2, 6.6].
-        LEFT_CX  = -3.4     # left panel center x
-        RIGHT_CX =  3.4     # right panel center x
-
-        # Vertical: headings at y=3.4, main content y=1.6 down to y=-2.4.
-
         # ==================================================================
-        # HEADINGS — small, centered above each panel
+        # HEADINGS
         # ==================================================================
-        heading_left = Text("a reviewer reading code", font_size=22, color=DIM)
-        heading_left.set(width=min(heading_left.width, MAX_HEADING_W))
+        heading_left = Text("a reviewer reading real senior code", font_size=20, color=DIM)
+        heading_left.set(width=min(heading_left.width, 5.6))
         heading_left.move_to([LEFT_CX, 3.4, 0])
-        clamp_to_frame(heading_left)
+        clamp_to_frame(heading_left, "heading_left")
 
-        heading_right = Text("a spiking neuron", font_size=22, color=DIM)
-        heading_right.set(width=min(heading_right.width, MAX_HEADING_W))
+        heading_right = Text("a spiking neuron", font_size=20, color=DIM)
+        heading_right.set(width=min(heading_right.width, 5.4))
         heading_right.move_to([RIGHT_CX, 3.4, 0])
-        clamp_to_frame(heading_right)
+        clamp_to_frame(heading_right, "heading_right")
 
-        self.play(FadeIn(heading_left), FadeIn(heading_right), run_time=0.5)
+        self.play(FadeIn(heading_left), FadeIn(heading_right), run_time=0.6)
 
         # ==================================================================
         # LEFT PANEL — code + eye + gut meter
@@ -120,47 +143,47 @@ class LIFMembraneOverLines(Scene):
             background="window",
             tab_width=4,
             formatter_style="monokai",
-        ).scale(0.55)
-        # Center code horizontally in the left panel, and position vertically.
-        code_block.move_to([LEFT_CX, 1.1, 0])
-        # Guarantee it fits — if the code renders wider than we expect, shrink.
-        if code_block.width > 5.6:
-            code_block.set(width=5.6)
-        clamp_to_frame(code_block)
+        ).scale(0.42)
+        # Position code near top of left panel so all 14 lines fit above the
+        # gut meter.
+        code_block.move_to([LEFT_CX, 0.55, 0])
+        # Guarantee width fits.
+        if code_block.width > 6.4:
+            code_block.set(width=6.4)
+            code_block.move_to([LEFT_CX, 0.55, 0])
+        clamp_to_frame(code_block, "code_block")
 
-        # Gut-reaction bar — narrow vertical, sitting to the left of the code.
-        gut_bar_x = code_block.get_left()[0] - 0.5
-        gut_bar_top    = code_block.get_top()[1]
-        gut_bar_bot    = code_block.get_bottom()[1]
-        gut_frame = Rectangle(
-            width=0.22,
-            height=gut_bar_top - gut_bar_bot,
+        # Gut-reaction bar — vertical strip along the *right* edge of the
+        # code block (inside the panel), matching code height.
+        code_top_y = code_block.get_top()[1]
+        code_bot_y = code_block.get_bottom()[1]
+        gut_bar_x  = code_block.get_right()[0] + 0.28
+        gut_frame  = Rectangle(
+            width=0.18,
+            height=code_top_y - code_bot_y,
             color=LINE_MID, stroke_width=1.5,
-        ).move_to([gut_bar_x, (gut_bar_top + gut_bar_bot) / 2, 0])
-        gut_label = Text("gut", font_size=14, color=DIM)
-        gut_label.next_to(gut_frame, DOWN, buff=0.12)
-        clamp_to_frame(gut_frame)
-        clamp_to_frame(gut_label)
+        ).move_to([gut_bar_x, (code_top_y + code_bot_y) / 2, 0])
+        gut_label = Text("gut", font_size=13, color=DIM)
+        gut_label.next_to(gut_frame, DOWN, buff=0.10)
+        clamp_to_frame(gut_frame, "gut_frame")
+        clamp_to_frame(gut_label, "gut_label")
 
-        # Gut fill — a rectangle inside gut_frame; height animates.
         def make_gut_fill(fill_frac):
-            h = max(0.001, (gut_bar_top - gut_bar_bot) * fill_frac)
+            h = max(0.001, (code_top_y - code_bot_y) * fill_frac)
             fill = Rectangle(
-                width=0.20, height=h,
+                width=0.16, height=h,
                 color=EYE_C, fill_opacity=0.85, stroke_width=0,
             )
-            fill.move_to([gut_bar_x, gut_bar_bot + h / 2, 0])
+            fill.move_to([gut_bar_x, code_bot_y + h / 2, 0])
             return fill
         gut_fill = make_gut_fill(0.0)
 
-        # The eye — a dot that lands on each code line in sequence.
-        eye = Dot(radius=0.10, color=EYE_C)
-        eye_glow = Circle(radius=0.16, color=EYE_C, fill_opacity=0.28, stroke_width=0)
+        # Eye
+        eye = Dot(radius=0.09, color=EYE_C)
+        eye_glow = Circle(radius=0.15, color=EYE_C, fill_opacity=0.28, stroke_width=0)
         eye_group = VGroup(eye_glow, eye)
-        # Position at first line initially.
         first_line_y = list(code_block.code_lines)[0].get_center()[1]
         eye_group.move_to([code_block.get_left()[0] - 0.15, first_line_y, 0])
-        # But start invisible; fade in with the panel.
 
         self.play(
             Create(code_block),
@@ -168,37 +191,36 @@ class LIFMembraneOverLines(Scene):
             FadeIn(gut_label),
             FadeIn(gut_fill),
             FadeIn(eye_group),
-            run_time=1.0,
+            run_time=1.2,
         )
 
         # ==================================================================
         # RIGHT PANEL — neuron + membrane axes
         # ==================================================================
-        neuron = Circle(radius=0.32, color=NEURON_C, stroke_width=3).set_fill(NEURON_C, opacity=0.15)
-        neuron.move_to([RIGHT_CX, 2.15, 0])
-        neuron_label = Text("V", font_size=20, color=NEURON_C, slant="ITALIC").move_to(neuron.get_center())
-        clamp_to_frame(neuron)
+        neuron = Circle(radius=0.34, color=NEURON_C, stroke_width=3).set_fill(NEURON_C, opacity=0.15)
+        neuron.move_to([RIGHT_CX, 2.1, 0])
+        neuron_label = Text("V", font_size=22, color=NEURON_C, slant="ITALIC").move_to(neuron.get_center())
+        clamp_to_frame(neuron, "neuron")
 
-        # Membrane trace axes — sits below the neuron, safely inside bounds.
         axes = Axes(
-            x_range=[0, 4, 1],
+            x_range=[0, 14, 2],
             y_range=[0, 1.3, 1],
-            x_length=4.4,
-            y_length=2.2,
+            x_length=4.6,
+            y_length=2.4,
             tips=False,
             axis_config={"color": LINE_MID, "stroke_width": 1.5, "include_ticks": False},
         )
-        axes.move_to([RIGHT_CX, -0.35, 0])
-        clamp_to_frame(axes)
+        axes.move_to([RIGHT_CX, -0.55, 0])
+        clamp_to_frame(axes, "axes")
 
         thresh_line = DashedLine(
             axes.c2p(0, THRESH),
-            axes.c2p(4, THRESH),
+            axes.c2p(14, THRESH),
             color=DIM, stroke_width=1.2, dash_length=0.06,
         )
-        thresh_label = Text("threshold", font_size=14, color=DIM)
+        thresh_label = Text("threshold", font_size=13, color=DIM)
         thresh_label.next_to(axes.c2p(0, THRESH), UP, buff=0.05).align_to(axes, LEFT).shift(RIGHT * 0.1)
-        clamp_to_frame(thresh_label)
+        clamp_to_frame(thresh_label, "thresh_label")
 
         membrane_trace = VMobject(color=SPIKE, stroke_width=3)
         membrane_trace.set_points_as_corners([axes.c2p(0, 0), axes.c2p(0.001, 0)])
@@ -208,11 +230,11 @@ class LIFMembraneOverLines(Scene):
             Create(axes),
             Create(thresh_line), FadeIn(thresh_label),
             Create(membrane_trace),
-            run_time=1.0,
+            run_time=1.2,
         )
 
         # ==================================================================
-        # BOTTOM BANNER — a persistent strip that changes text across beats
+        # BOTTOM BANNER
         # ==================================================================
         banner_bg = RoundedRectangle(
             width=12.6, height=0.9,
@@ -220,52 +242,53 @@ class LIFMembraneOverLines(Scene):
             color=LINE_MID, stroke_width=1.0,
         ).set_fill("#141416", opacity=0.9)
         banner_bg.move_to([0, BANNER_Y, 0])
-        clamp_to_frame(banner_bg)
+        clamp_to_frame(banner_bg, "banner_bg")
 
         banner_text = Text("", font_size=22, color=WHITE)
         banner_text.move_to(banner_bg.get_center())
-
         self.play(FadeIn(banner_bg), run_time=0.35)
 
-        def set_banner(new_str: str, color=WHITE, run_time: float = 0.35):
-            """Fade the banner's text to a new string, in place."""
+        def set_banner(new_str: str, color=WHITE, run_time: float = 0.5):
             nonlocal banner_text
             new_text = Text(new_str, font_size=22, color=color)
             new_text.set(width=min(new_text.width, MAX_BANNER_W))
             new_text.move_to(banner_bg.get_center())
             self.play(Transform(banner_text, new_text), run_time=run_time)
 
-        # Beat 1 banner.
-        set_banner("watch these two rise together.", DIM)
+        set_banner("watch it read a real function from the Python stdlib.", DIM, run_time=0.6)
+        self.wait(0.9)
 
         # ==================================================================
-        # BEAT 1 — Synchronized reading (0..8s)
-        # Eye moves down code lines. Membrane and gut fill rise in sync.
+        # THE READ — line by line, slower than before, longer holds
         # ==================================================================
+        set_banner("its 'gut' rises with each line — just like yours does.", DIM, run_time=0.6)
+        self.wait(0.6)
+
         v = 0.0
         trace_points = [axes.c2p(0, 0)]
         code_line_mobs = list(code_block.code_lines)
+        FLINCH_IDX = 12    # the "except (OSError, ValueError):" line (0-based)
 
         for idx, (line_mob, bump) in enumerate(zip(code_line_mobs, BUMPS)):
             target_y = line_mob.get_center()[1]
             new_eye_pos = np.array([code_block.get_left()[0] - 0.15, target_y, 0.0])
 
-            # Between-line leak.
+            # Between-line leak (small backward slope).
             if idx > 0:
                 v_pre = v * LEAK
-                trace_points.append(axes.c2p(idx - 0.5, v_pre))
+                trace_points.append(axes.c2p(idx - 0.4, v_pre))
                 partial_trace = VMobject(color=SPIKE, stroke_width=3)
                 partial_trace.set_points_as_corners(trace_points)
-                new_gut_pre = make_gut_fill(v_pre / 1.3)  # normalize by y_max=1.3
+                new_gut_pre = make_gut_fill(v_pre / 1.3)
                 self.play(
                     eye_group.animate.move_to(new_eye_pos),
                     Transform(gut_fill, new_gut_pre),
                     Transform(membrane_trace, partial_trace),
-                    run_time=0.45, rate_func=smooth,
+                    run_time=0.35, rate_func=smooth,
                 )
                 v = v_pre
 
-            # The line highlights as the eye lands.
+            # Highlight the current line as the eye lands.
             self.play(line_mob.animate.set_fill(color=WHITE, opacity=1.0), run_time=0.08)
 
             v_post = v + bump
@@ -274,72 +297,57 @@ class LIFMembraneOverLines(Scene):
             new_trace.set_points_as_corners(trace_points)
             new_gut = make_gut_fill(min(1.0, v_post / 1.3))
 
-            if v_post >= THRESH and v < THRESH:
-                # Threshold crossing — recolor + flash both sides.
+            # Is this the flinch line?
+            is_flinch = idx == FLINCH_IDX and v < THRESH and v_post >= THRESH
+            if is_flinch:
+                # Recolor trace at crossing point.
                 new_trace.set_color(SPIKE_HOT)
+                # Put a "!" marker to the right of the flinch line.
+                flinch_marker = Text("❗", font_size=26, color=FLINCH)
+                flinch_marker.next_to(line_mob, RIGHT, buff=0.15)
+                # If it would clip the right of the code block, tuck it inside.
+                if flinch_marker.get_right()[0] > gut_frame.get_left()[0] - 0.1:
+                    flinch_marker.move_to([gut_frame.get_left()[0] - 0.28, line_mob.get_center()[1], 0])
                 self.play(
                     Transform(gut_fill, new_gut),
                     Transform(membrane_trace, new_trace),
                     neuron.animate.set_stroke(SPIKE_HOT, width=5).set_fill(SPIKE_HOT, opacity=0.5),
-                    Flash(neuron, color=SPIKE_HOT, flash_radius=0.5, num_lines=14, line_length=0.15),
-                    Flash(eye_group, color=RED, flash_radius=0.35, num_lines=10, line_length=0.12),
-                    run_time=0.55,
+                    Flash(neuron, color=SPIKE_HOT, flash_radius=0.55, num_lines=14, line_length=0.15),
+                    FadeIn(flinch_marker, scale=1.4),
+                    Flash(eye_group, color=FLINCH, flash_radius=0.35, num_lines=10, line_length=0.12),
+                    run_time=0.75,
                 )
+                # Hold for a beat so audience registers the sync.
+                self.wait(0.8)
+                set_banner("both flinched on the same line.", SPIKE, run_time=0.5)
+                self.wait(1.4)
             else:
                 self.play(
                     Transform(gut_fill, new_gut),
                     Transform(membrane_trace, new_trace),
-                    run_time=0.45,
+                    run_time=0.35,
                 )
+                # Micro-pause after each line so the pacing feels human.
+                self.wait(0.15)
             v = v_post
 
-        self.wait(0.4)
+        self.wait(0.5)
 
         # ==================================================================
-        # BEAT 2 — Punchline in the banner (no scene wipe) (8..14s)
+        # PUNCHLINE — the moment they see the parallel
         # ==================================================================
-        set_banner("same accumulation. same threshold. same reaction.", SPIKE, run_time=0.55)
-        self.wait(1.6)
+        set_banner("same accumulation. same threshold. same reaction.", SPIKE, run_time=0.6)
+        self.wait(2.2)
 
         # ==================================================================
-        # BEAT 3 — Where the intuition came from (14..22s)
-        # Small yellow "past function" dots stream in from off-frame toward
-        # the neuron. Composition still visible; banner changes.
+        # WHERE THE INTUITION CAME FROM
         # ==================================================================
-        set_banner("its sensitivity was trained on 2,680 senior-authored functions.", WHITE, run_time=0.5)
+        set_banner("its sensitivity came from 2,680 senior-authored functions.", WHITE, run_time=0.55)
+        self.wait(1.3)
+        set_banner("reading a lot of code — same as you.", SPIKE, run_time=0.5)
+        self.wait(2.0)
 
-        # Corpus dots stream in from the right edge toward the neuron.
-        rng = np.random.default_rng(11)
-        corpus_dots = VGroup()
-        for _ in range(24):
-            # Enter from the right side of the right panel, at random y within safe bounds.
-            enter_y = rng.uniform(-1.8, 3.0)
-            enter_pt = np.array([X_MAX - 0.2, enter_y, 0.0])
-            d = Dot(radius=0.055, color=SPIKE, fill_opacity=0.0).move_to(enter_pt)
-            corpus_dots.add(d)
-        self.add(corpus_dots)
-
-        # Animate them: fade in at entry, drift toward the neuron, fade out.
-        for k, d in enumerate(corpus_dots):
-            neuron_pt = neuron.get_center()
-            # Slight fan-in offset so they don't stack.
-            offset = 0.02 * (k - 12)
-            end_pt = neuron_pt + np.array([offset, offset * 0.3, 0.0])
-            self.play(
-                d.animate.set_opacity(0.85),
-                run_time=0.05,
-            )
-            self.play(
-                d.animate.move_to(end_pt).set_opacity(0.0),
-                run_time=0.15,
-            )
-
-        self.wait(0.4)
-        set_banner('reading a lot of code — same as you.', SPIKE, run_time=0.5)
-
-        self.wait(1.8)
-
-        # Clean fade so the closing frame is crisp.
+        # Clean fade.
         self.play(
             FadeOut(heading_left), FadeOut(heading_right),
             FadeOut(code_block), FadeOut(gut_frame), FadeOut(gut_fill),
@@ -348,7 +356,7 @@ class LIFMembraneOverLines(Scene):
             FadeOut(axes), FadeOut(thresh_line), FadeOut(thresh_label),
             FadeOut(membrane_trace),
             FadeOut(banner_bg), FadeOut(banner_text),
-            run_time=0.6,
+            run_time=0.7,
         )
 
 
