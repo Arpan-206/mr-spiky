@@ -283,7 +283,7 @@ jobs:
   review:
     uses: Arpan-206/mr-spiky/.github/workflows/mr-spiky-review.yml@main
     with:
-      min_score: 0.95      # threshold to comment on a line (default 0.95)
+      min_score: 0.90      # threshold to comment on a line (default 0.90)
       max_comments: 5      # hard cap on comments per PR (default 5)
     secrets:
       # Optional. When set, Claude Haiku rewrites each flag's templated

@@ -52,9 +52,11 @@ from .infer import analyze, function_scores
 log = logging.getLogger("mrspiky.review")
 
 # Defaults tuned for a review bot, not the interactive API:
-#   - min-score 0.95 (vs 0.9 default) → very high bar to comment inline
-#   - max-comments 5 per PR → prevents diff-spam on large refactors
-DEFAULT_MIN_SCORE = 0.95
+#   - min-score 0.90 matches the analyze flag threshold (top 10% vs
+#     senior code). 0.95 was tuned before we had ground truth on where
+#     realistic junior code lands and left most multi-axis gnarl silent.
+#   - max-comments 5 per PR → prevents diff-spam on large refactors.
+DEFAULT_MIN_SCORE = 0.90
 DEFAULT_MAX_COMMENTS = 5
 
 
@@ -213,7 +215,7 @@ def _line_body(entry: dict[str, Any], path: str) -> str:
     lineage = ctx.get("lineage") or []
 
     lines = [
-        f"**Mr. Spiky** — score `{score:.2f}` (top 5% for senior Python code)",
+        f"**Mr. Spiky** — score `{score:.2f}` (top 10% for senior Python code)",
         "",
         reason,
         "",

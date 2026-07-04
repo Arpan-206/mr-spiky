@@ -46,7 +46,7 @@ jobs:
             python -m src.review \
               --diff /work/pr.patch \
               --root /work/pr-checkout \
-              --min-score 0.95 \
+              --min-score 0.90 \
               --max-comments 5 \
               --format json \
             > review.json

@@ -6,7 +6,7 @@ name: Mr. Spiky code review
 #     review:
 #       uses: Arpan-206/mr-spiky/.github/workflows/mr-spiky-review.yml@main
 #       with:
-#         min_score: 0.95
+#         min_score: 0.90
 #         max_comments: 5
 #       permissions:
 #         contents: read
@@ -27,7 +27,7 @@ on:
         description: "Score threshold for a line to get an inline comment (0.0–1.0). Higher = fewer comments."
         required: false
         type: number
-        default: 0.95
+        default: 0.90
       max_comments:
         description: "Hard cap on inline comments per PR. Prevents large refactors from spamming the diff."
         required: false

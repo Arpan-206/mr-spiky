@@ -64,7 +64,7 @@ _SYSTEM_PROMPT = """You are helping a code-review bot called Mr. Spiky rephrase 
 Mr. Spiky is a spiking neural network trained on ~2680 Python functions written by maintainers at CPython, Django, FastAPI, Flask, requests, black, httpx, pydantic, sqlalchemy, and poetry. It flags lines whose structural features look unusual for that senior-approved code. Your job is to take Mr. Spiky's structured findings on ONE flagged line and rewrite them as a single sentence of reviewer feedback that reads like a human left the comment.
 
 ## What you receive per line
-- `score`: the SNN's per-line suspicion score, 0 to 1. Anything ≥ 0.95 is "top 5% most unusual for senior code."
+- `score`: the SNN's per-line suspicion score, 0 to 1. Anything ≥ 0.90 is "top 10% most unusual for senior code."
 - `axes`: a dict of six axis scores, each 0 to 1, representing structural dimensions the SNN objected to.
 - `lineage`: up to three innermost AST-node ancestors of the line — e.g. `[{"label": "`if strict`", "line": 49}, {"label": "`for i in range(x)`", "line": 47}]`.
 - `line_text`: the source of the flagged line itself.

@@ -12,8 +12,9 @@ For each Python line added or modified by a PR:
 2. Runs `analyze()` on each file to get per-line scores + axes.
 3. Filters to lines actually inside the diff hunks (unchanged context lines
    are never commented on, even if they'd otherwise score high).
-4. Applies a stricter-than-API threshold (`--min-score 0.95`, `--max-comments 5`)
-   so the bot doesn't spam reviewers.
+4. Applies the default review threshold (`--min-score 0.90`, `--max-comments 5`)
+   — same flag cutoff as the interactive API, but capped at 5 comments per PR
+   so refactors don't turn into diff-spam.
 5. Posts a single GitHub review containing:
    - A **summary comment** at the top of the PR with a table of flagged lines.
    - **Inline review comments** on the top-N flagged lines with reason, top
@@ -53,7 +54,7 @@ jobs:
       mr_spiky_ref: v0.2.0   # pin to a specific mr-spiky version
 ```
 
-All three inputs are optional. Defaults: `min_score=0.95`, `max_comments=5`,
+All three inputs are optional. Defaults: `min_score=0.90`, `max_comments=5`,
 `mr_spiky_ref=main`. Lower `min_score` = more comments = noisier. In prod,
 pin `mr_spiky_ref` to a tag so bot behavior is stable.
 
@@ -88,6 +89,6 @@ the bot on a real repo.
 - **Bot commented on the wrong lines** — Mr. Spiky filters comments to
   changed lines inside diff hunks. If you're seeing it comment on unchanged
   code, that's a bug — please open an issue with the diff and workflow log.
-- **Bot didn't comment at all** — either no lines cleared the 0.95
+- **Bot didn't comment at all** — either no lines cleared the 0.90
   threshold (common on small clean PRs, which is the intended behavior)
   or the file wasn't Python.
