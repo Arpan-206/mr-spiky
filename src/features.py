@@ -69,20 +69,20 @@ AXIS_DEFINITIONS: dict[str, tuple[str, ...]] = {
 }
 AXIS_NAMES: tuple[str, ...] = tuple(AXIS_DEFINITIONS.keys())
 
-# Per-axis empirical p95 over the senior corpus. Values above ~1.0 after
-# dividing by these correspond to "top 5% along this axis" — i.e. genuinely
-# extreme relative to how senior code looks. Measured once, hardcoded so
-# inference is deterministic.
+# Per-axis empirical p95 of the RAW (pre-rescale) axis value over the current
+# senior corpus. Rescaling by these means a value of ~1.0 corresponds to
+# "top 5% along this axis" — the axes are then comparable across dimensions.
+# Recomputed whenever features.py changes: see `_measure_axis_p95` in this
+# module (run manually against data/senior_corpus.json).
 _AXIS_P95: dict[str, float] = {
-    "complexity":         0.50,   # (nesting_depth p95=1.0 + cyclomatic p95=0.85 + length p95=0.08) / 3
-    "tangled_state":      0.50,   # (use_def p95=1.0 + name_flow p95=0.75) / 2 — but real p95 is lower
-    "hidden_calls":       0.60,   # call_graph p95=1.0, but most lines have moderate call surface
-    "exception_surface":  0.10,   # exception_density p95=0.06; multiplied for headroom
-    "naming":             0.70,   # (token_entropy p95=0.6 + naming_entropy p95=0.8) / 2
+    "complexity":         0.37,   # was 0.50; features got more sparse per-line
+    "tangled_state":      0.63,   # was 0.50; use_def+name_flow p95 higher than assumed
+    "hidden_calls":       0.50,   # was 0.60; per-line call weight is smaller
+    "exception_surface":  0.06,   # was 0.10; exception_density is naturally sparse
+    "naming":             0.68,   # was 0.70; small correction
     # parse_error is 0.0 for every senior-corpus example (it always parses),
     # so there's no real p95 to measure. Hardcode a small constant so any
-    # actual occurrence (1.0) saturates the axis to 1.0 via the min(1.0, ...)
-    # rescale below, rather than being silently averaged into insignificance.
+    # actual occurrence (1.0) saturates the axis to 1.0.
     "malformed":          0.05,
 }
 
@@ -108,10 +108,10 @@ _FEATURE_CAPS: dict[str, float] = {
     "length": 200.0,
     "token_entropy": 6.0,
     "naming_entropy": 5.0,
-    "cyclomatic_proxy": 20.0,
+    "cyclomatic_proxy": 3.0,    # LOCAL: branching nodes starting on this line; usually 0 or 1
     "use_def_distance": 30.0,   # 30 lines between def and use is already spooky
     "name_flow": 12.0,          # 12 distinct names touched on one line is dense
-    "call_graph_shape": 15.0,   # 15 outgoing calls in scope
+    "call_graph_shape": 4.0,    # LOCAL: call weight on this line; multi-call lines are gnarly
     "exception_density": 0.5,   # exception nodes / body_size ratio; capped at 0.5
     "parse_error": 1.0,         # already 0/1, cap is a no-op
 }
@@ -473,35 +473,69 @@ def _skip_lines(tree: ast.AST) -> set[int]:
 
 
 def _line_scoped_stats(tree: ast.AST) -> tuple[
-    dict[int, tuple[float, float, float, float]],  # (nd, cx, call_shape, exc_dens) per line
-    dict[int, dict[str, int]],                      # per-function line-set → local use-def defs
-    dict[int, int],                                 # line -> function's start line (for def lookup)
+    dict[int, tuple[float, float]],                 # (nesting_depth, exception_density) per line — scope-level
+    dict[int, dict[str, int]],                      # per-function → local use-def defs
+    dict[int, int],                                 # line -> function's start line
+    dict[int, float],                               # per-line LOCAL cyclomatic (branch nodes starting on this line)
+    dict[int, float],                               # per-line LOCAL call_graph (call nodes starting on this line)
 ]:
-    """Precompute per-function scope stats, mapped from line number to values.
+    """Precompute stats indexed by line number.
+
+    Historically we copied the enclosing function's *total* cyclomatic and
+    call-graph counts to every line inside it — meaning a trivial `except:`
+    inside a big function scored the same as the function's most complex
+    line. That inflated every line and produced false positives on plain
+    code sitting inside a gnarly function.
+
+    Now we compute those two features *locally* — a line's cyclomatic
+    contribution is the number of branching AST nodes whose `lineno` equals
+    that line; same for calls. Nesting depth and exception density stay
+    scope-level (they're inherently "context" signals).
 
     Returns:
-      scope_stats[line] = (nesting_depth, cyclomatic, call_shape, exception_density)
-      fn_defs[fn_start_line] = {var: first_def_line} (for use-def gap computation)
-      line_to_fn[line] = fn_start_line
+      scope_stats[line] = (nesting_depth, exception_density) — scope-level context
+      fn_defs[fn_start]  = {var: first_def_line}              — for use-def gap
+      line_to_fn[line]   = fn_start                           — function lookup
+      line_cx[line]      = local branching count              — per-line
+      line_cg[line]      = local call weight                  — per-line
     """
-    scope_stats: dict[int, tuple[float, float, float, float]] = {}
+    scope_stats: dict[int, tuple[float, float]] = {}
     fn_defs: dict[int, dict[str, int]] = {}
     line_to_fn: dict[int, int] = {}
 
+    # Per-line local counts: walk the whole tree once and bucket by lineno.
+    line_cx: dict[int, float] = {}
+    line_cg: dict[int, float] = {}
+    for node in ast.walk(tree):
+        lineno = getattr(node, "lineno", None)
+        if lineno is None:
+            continue
+        if isinstance(node, _BRANCHING_NODES):
+            line_cx[lineno] = line_cx.get(lineno, 0.0) + 1.0
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                weight = 0.5 if func.id in _STDLIB_HINTS else 2.0
+            elif isinstance(func, ast.Attribute):
+                weight = 1.0
+            else:
+                weight = 1.5
+            line_cg[lineno] = line_cg.get(lineno, 0.0) + weight
+
+    # Function-scope context: nesting depth + exception density, still
+    # inherited by all lines inside the function.
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             nd = float(_nesting_depth(node))
-            cx = float(_cyclomatic_proxy(node))
-            cs = _call_graph_shape(node)
             ed = _exception_density(node)
             defs = _use_def_map(node)
             fn_start = node.lineno
             fn_defs[fn_start] = defs
             for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1):
-                scope_stats[ln] = (nd, cx, cs, ed)
+                scope_stats[ln] = (nd, ed)
                 line_to_fn[ln] = fn_start
 
-    return scope_stats, fn_defs, line_to_fn
+    return scope_stats, fn_defs, line_to_fn, line_cx, line_cg
 
 
 def extract_line_features(src: str) -> list[LineFeatures]:
@@ -515,14 +549,16 @@ def extract_line_features(src: str) -> list[LineFeatures]:
     """
     lines = src.splitlines()
 
-    scope_stats: dict[int, tuple[float, float, float, float]] = {}
+    scope_stats: dict[int, tuple[float, float]] = {}
     fn_defs: dict[int, dict[str, int]] = {}
     line_to_fn: dict[int, int] = {}
+    line_cx: dict[int, float] = {}
+    line_cg: dict[int, float] = {}
     skip_lines: set[int] = set()
     syntax_error_line: int | None = None
     try:
         tree = ast.parse(src)
-        scope_stats, fn_defs, line_to_fn = _line_scoped_stats(tree)
+        scope_stats, fn_defs, line_to_fn, line_cx, line_cg = _line_scoped_stats(tree)
         skip_lines = _skip_lines(tree)
     except SyntaxError as e:
         if lines:
@@ -548,20 +584,29 @@ def extract_line_features(src: str) -> list[LineFeatures]:
 
         indent = (len(raw) - len(raw.lstrip(" \t"))) // 2
         names = [t for t in tokens if t.isidentifier()]
-        nd_scope, cx_scope, cs_scope, ed_scope = scope_stats.get(i, (0.0, 1.0, 0.0, 0.0))
+        nd_scope, ed_scope = scope_stats.get(i, (0.0, 0.0))
         fn_start = line_to_fn.get(i)
         defs = fn_defs.get(fn_start, {}) if fn_start is not None else {}
         use_def_gap = _line_use_def_gap(i, names, defs)
 
+        # nesting_depth = 70% local (this line's own indentation) + 30%
+        # scope (enclosing function's max nesting). Local dominates so a
+        # trivial `return x` at column 0 of a nested function doesn't
+        # inherit the function's deepest branch as its own score, but scope
+        # still contributes so lines *inside* a gnarly function score a
+        # bit higher than the same line in isolation.
+        local_nd = float(indent)
+        blended_nd = 0.7 * local_nd + 0.3 * nd_scope
+
         vec = [
-            max(float(indent), nd_scope),
+            blended_nd,
             float(len(tokens)),
             _shannon(tokens),
             _naming_entropy(names),
-            cx_scope,
+            line_cx.get(i, 0.0),           # LOCAL cyclomatic count (branches starting on this line)
             use_def_gap,
             _name_flow(names),
-            cs_scope,
+            line_cg.get(i, 0.0),           # LOCAL call-graph weight (calls starting on this line)
             ed_scope,
             1.0 if is_error_line else 0.0,
         ]
