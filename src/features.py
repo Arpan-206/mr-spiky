@@ -15,9 +15,17 @@ Feature vector (order is contractual — encode.py and model.py depend on it):
     6. name_flow           — distinct identifiers touched on this line / in this fn
     7. call_graph_shape    — outgoing calls in scope, weighted by library-vs-local
     8. exception_density   — try/except/raise count / body_size in scope
+    9. parse_error         — 1.0 on the line where ast.parse choked, else 0.0
 
 Tiers 1's four new features add channels the AST already has but the original
 five ignored: data-flow (5), name-flow (6), call graph (7), exceptions (8).
+
+Tier 2 adds parse_error (9): senior code always parses, so this is a constant
+zero across the entire training corpus — it's inert during STDP pretraining
+and whitening, but gives the SNN a dedicated, previously-nonexistent channel
+to react to at inference when code doesn't even compile (e.g. `if x = True:`,
+a typo for `==`). See CLAUDE.md for why richer features (not threshold
+tuning) are the intended way to close detection gaps.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ FEATURE_NAMES: tuple[str, ...] = (
     "name_flow",
     "call_graph_shape",
     "exception_density",
+    "parse_error",
 )
 NUM_FEATURES = len(FEATURE_NAMES)
 
@@ -56,6 +65,7 @@ AXIS_DEFINITIONS: dict[str, tuple[str, ...]] = {
     "hidden_calls":       ("call_graph_shape",),
     "exception_surface":  ("exception_density",),
     "naming":             ("token_entropy", "naming_entropy"),
+    "malformed":          ("parse_error",),
 }
 AXIS_NAMES: tuple[str, ...] = tuple(AXIS_DEFINITIONS.keys())
 
@@ -69,6 +79,11 @@ _AXIS_P95: dict[str, float] = {
     "hidden_calls":       0.60,   # call_graph p95=1.0, but most lines have moderate call surface
     "exception_surface":  0.10,   # exception_density p95=0.06; multiplied for headroom
     "naming":             0.70,   # (token_entropy p95=0.6 + naming_entropy p95=0.8) / 2
+    # parse_error is 0.0 for every senior-corpus example (it always parses),
+    # so there's no real p95 to measure. Hardcode a small constant so any
+    # actual occurrence (1.0) saturates the axis to 1.0 via the min(1.0, ...)
+    # rescale below, rather than being silently averaged into insignificance.
+    "malformed":          0.05,
 }
 
 
@@ -98,6 +113,7 @@ _FEATURE_CAPS: dict[str, float] = {
     "name_flow": 12.0,          # 12 distinct names touched on one line is dense
     "call_graph_shape": 15.0,   # 15 outgoing calls in scope
     "exception_density": 0.5,   # exception nodes / body_size ratio; capped at 0.5
+    "parse_error": 1.0,         # already 0/1, cap is a no-op
 }
 
 _BRANCHING_NODES: tuple[type, ...] = (
@@ -275,6 +291,7 @@ def _function_vector(fn: ast.AST) -> list[float]:
         _name_flow(fn),
         _call_graph_shape(fn),
         _exception_density(fn),
+        0.0,  # parse_error: a function only gets a vector if it parsed at all
     ]
 
 
@@ -397,20 +414,24 @@ def extract_line_features(src: str) -> list[LineFeatures]:
     fn_defs: dict[int, dict[str, int]] = {}
     line_to_fn: dict[int, int] = {}
     skip_lines: set[int] = set()
+    syntax_error_line: int | None = None
     try:
         tree = ast.parse(src)
         scope_stats, fn_defs, line_to_fn = _line_scoped_stats(tree)
         skip_lines = _skip_lines(tree)
-    except SyntaxError:
-        pass
+    except SyntaxError as e:
+        if lines:
+            syntax_error_line = max(1, min(e.lineno or 1, len(lines)))
 
     out: list[LineFeatures] = []
     for i, raw in enumerate(lines, start=1):
         stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if i in skip_lines:
-            continue
+        is_error_line = i == syntax_error_line
+        if not is_error_line:
+            if not stripped or stripped.startswith("#"):
+                continue
+            if i in skip_lines:
+                continue
 
         tokens: list[str] = []
         try:
@@ -437,6 +458,7 @@ def extract_line_features(src: str) -> list[LineFeatures]:
             _name_flow(names),
             cs_scope,
             ed_scope,
+            1.0 if is_error_line else 0.0,
         ]
         out.append(LineFeatures(line=i, vector=vec))
 

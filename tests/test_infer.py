@@ -52,3 +52,16 @@ def test_analyze_handles_empty_input() -> None:
 def test_analyze_handles_syntax_error() -> None:
     result = analyze("def broken(:\n    return")
     _assert_schema(result)  # must still return valid JSON, not raise
+
+
+def test_analyze_syntax_error_line_carries_malformed_axis() -> None:
+    result = analyze("if boolean = True:\n    pass\n")
+    _assert_schema(result)
+    line1 = next(e for e in result["lines"] if e["line"] == 1)
+    assert line1["axes"].get("malformed", 0.0) > 0.0
+    # Parse-error lines are always flagged — the SNN can't have learned to
+    # react (parse errors are absent from senior training code), so infer
+    # overrides the score to force a flag when parse_error=1.0.
+    assert line1["flag"] is True
+    other_lines = [e for e in result["lines"] if e["line"] != 1]
+    assert all(e["axes"].get("malformed", 0.0) == 0.0 for e in other_lines)

@@ -40,7 +40,9 @@ _THRESHOLD_PATH = _MODELS_DIR / "threshold.json"
 # in mock mode. Hand-picked, ordered to match FEATURE_NAMES in features.py.
 # nesting_depth + cyclomatic_proxy dominate; the new (use_def, call_graph)
 # dims get moderate weight; length + exception_density are near-noise.
-_MOCK_WEIGHTS: tuple[float, ...] = (0.30, 0.05, 0.05, 0.05, 0.20, 0.10, 0.10, 0.10, 0.05)
+# parse_error gets the largest single weight — code that doesn't even parse
+# should dominate the mock linear score, not just nudge it.
+_MOCK_WEIGHTS: tuple[float, ...] = (0.20, 0.05, 0.05, 0.05, 0.15, 0.10, 0.10, 0.10, 0.05, 0.50)
 assert len(_MOCK_WEIGHTS) == NUM_FEATURES, "mock weights out of sync with features"
 _MOCK_THRESHOLD = 0.55
 
@@ -218,6 +220,7 @@ _AXIS_PHRASE: dict[str, str] = {
     "hidden_calls":       "delegates to opaque calls",
     "exception_surface":  "heavy exception handling",
     "naming":             "unusual identifier density",
+    "malformed":          "doesn't parse as valid Python — likely a typo",
 }
 
 
@@ -309,6 +312,21 @@ def analyze(code: str) -> dict[str, Any]:
         if snn["ecdf_ref"] is not None:
             raw = ecdf_rescale(raw, snn["ecdf_ref"])
         scores = list(zip((lf.line for lf in line_feats), raw))
+
+    # parse_error override: the SNN cannot have learned to react to parse
+    # errors (they're absent from senior training code by definition), so
+    # its score won't cross the flag threshold on a broken line. But we
+    # still want that line surfaced — it's the strongest possible signal.
+    # Force the score to a value that flags in either mode.
+    _parse_error_idx = FEATURE_NAMES.index("parse_error")
+    parse_error_lines = {
+        lf.line for lf in line_feats if lf.vector[_parse_error_idx] >= 1.0
+    }
+    if parse_error_lines:
+        scores = [
+            (ln, max(sc, 1.0)) if ln in parse_error_lines else (ln, sc)
+            for ln, sc in scores
+        ]
 
     # Per-line axes: computed from the same normalized feature vector the SNN
     # consumed, so the axes explain *what the SNN saw*, not a parallel channel.

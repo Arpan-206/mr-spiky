@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .infer import analyze, describe_mode
@@ -13,8 +14,20 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Mr. Spiky — Intuition Compiler", version="0.1.0")
 
-SUPPORTED_LANGUAGES = {"python"}
+# CORS: the frontend origins that the demo runs on. Localhost for dev,
+# crnicholson.com for the deployed demo. Widen this list if you host the
+# frontend somewhere else.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://mr-spiky.crnicholson.com",
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+SUPPORTED_LANGUAGES = {"python"}
 
 class AnalyzeRequest(BaseModel):
     code: str = Field(..., description="Source code to analyze")
