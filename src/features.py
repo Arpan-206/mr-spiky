@@ -155,6 +155,111 @@ class LineFeatures:
     vector: list[float]  # length == NUM_FEATURES
 
 
+def _node_label(node: ast.AST) -> str | None:
+    """Short human-readable label for an AST node — used in lineage strings
+    that show up in review comments. Returns None for nodes we don't want
+    to advertise (e.g. Module, plain Name loads).
+
+    The labels read like a reviewer describing structure:
+        for i in range(x) at L12
+        if x > 0 at L14
+        try at L10
+        function parse_config at L5
+    """
+    if isinstance(node, ast.FunctionDef):
+        return f"function `{node.name}`"
+    if isinstance(node, ast.AsyncFunctionDef):
+        return f"async function `{node.name}`"
+    if isinstance(node, ast.ClassDef):
+        return f"class `{node.name}`"
+    if isinstance(node, ast.For):
+        try:
+            tgt = ast.unparse(node.target)
+            it = ast.unparse(node.iter)
+            return f"`for {tgt} in {it}`"
+        except Exception:  # noqa: BLE001
+            return "`for` loop"
+    if isinstance(node, ast.AsyncFor):
+        return "`async for` loop"
+    if isinstance(node, ast.While):
+        try:
+            return f"`while {ast.unparse(node.test)}`"
+        except Exception:  # noqa: BLE001
+            return "`while` loop"
+    if isinstance(node, ast.If):
+        try:
+            return f"`if {ast.unparse(node.test)}`"
+        except Exception:  # noqa: BLE001
+            return "`if` block"
+    if isinstance(node, ast.Try):
+        return "`try` block"
+    if isinstance(node, ast.ExceptHandler):
+        try:
+            return f"`except {ast.unparse(node.type)}`" if node.type else "`except` handler"
+        except Exception:  # noqa: BLE001
+            return "`except` handler"
+    if isinstance(node, ast.With):
+        return "`with` block"
+    if isinstance(node, ast.AsyncWith):
+        return "`async with` block"
+    if isinstance(node, ast.Match):
+        return "`match` statement"
+    return None
+
+
+_LINEAGE_NODE_TYPES: tuple[type, ...] = (
+    ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+    ast.For, ast.AsyncFor, ast.While, ast.If,
+    ast.Try, ast.ExceptHandler, ast.With, ast.AsyncWith, ast.Match,
+)
+
+
+def line_lineage(src: str, line: int, max_depth: int = 3) -> list[dict[str, object]]:
+    """Return the innermost `max_depth` AST-node ancestors that contain `line`.
+
+    Each entry is `{"kind": "<node class name>", "label": "<human string>",
+    "line": <starting line of the node>}`, ordered innermost-first. Used by
+    the review pipeline to build reason strings like `"nested for at L47
+    inside if at L45 inside function parse_config at L38"`.
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return []
+
+    hits: list[tuple[int, ast.AST]] = []  # (start_line, node)
+    for node in ast.walk(tree):
+        if not isinstance(node, _LINEAGE_NODE_TYPES):
+            continue
+        start = getattr(node, "lineno", None)
+        end = getattr(node, "end_lineno", None) or start
+        if start is None:
+            continue
+        if start <= line <= end:
+            hits.append((start, node))
+
+    # Sort by start line descending — deepest (highest lineno within `line`) first.
+    hits.sort(key=lambda p: -p[0])
+    out: list[dict[str, object]] = []
+    seen: set[int] = set()
+    for start, node in hits:
+        label = _node_label(node)
+        if label is None:
+            continue
+        # Skip functions/classes that already appear (rare) or exact-line dupes.
+        if start in seen:
+            continue
+        seen.add(start)
+        out.append({
+            "kind": type(node).__name__,
+            "label": label,
+            "line": start,
+        })
+        if len(out) >= max_depth:
+            break
+    return out
+
+
 def _shannon(items: Iterable) -> float:
     counts = Counter(items)
     total = sum(counts.values())

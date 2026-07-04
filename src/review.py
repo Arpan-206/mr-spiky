@@ -47,7 +47,7 @@ from typing import Any, Iterable
 
 import requests
 
-from .infer import analyze
+from .infer import analyze, function_scores
 
 log = logging.getLogger("mrspiky.review")
 
@@ -91,56 +91,72 @@ def _fetch_pr_diff(pr_ref: str) -> str:
     return out
 
 
-def _fetch_pr_file_contents(pr_ref: str) -> dict[str, str]:
-    """Fetch full post-change contents of every file touched by the PR.
+def _fetch_pr_file_contents(pr_ref: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Fetch full head-side AND base-side contents of every file touched.
 
-    We need this because the diff alone is not enough for the SNN — the
-    scoring is contextual (line N's score depends on lines 1..N-1). So we
-    grab each file at the PR's head commit and score the whole thing, then
-    filter to only lines actually inside the diff hunks.
+    Head content is what the SNN scores to produce the "after" per-line
+    output. Base content is what we score to get the "before" function
+    scores, so we can report `function_score_delta` per flagged line — the
+    concrete "your changes made this function 20% gnarlier" signal.
+
+    Returns (head_files, base_files). base_files may be missing keys where
+    the file was newly added by this PR.
     """
     m = re.match(r"^(?P<owner>[^/]+)/(?P<repo>[^#]+)#(?P<num>\d+)$", pr_ref)
     owner, repo, num = m["owner"], m["repo"], m["num"]
 
-    # Use `gh api` to get the PR + list-of-files + head SHA.
     pr_json = subprocess.check_output(
         ["gh", "api", f"repos/{owner}/{repo}/pulls/{num}"], text=True,
     )
     pr = json.loads(pr_json)
     head_sha = pr["head"]["sha"]
     head_repo = pr["head"]["repo"]["full_name"]  # may be a fork
+    base_sha = pr["base"]["sha"]
+    base_repo = pr["base"]["repo"]["full_name"]
 
     files_json = subprocess.check_output(
         ["gh", "api", f"repos/{owner}/{repo}/pulls/{num}/files", "--paginate"], text=True,
     )
-    # `--paginate` concatenates JSON arrays; parse leniently.
     try:
         files = json.loads(files_json)
     except json.JSONDecodeError:
-        # `gh api --paginate` sometimes joins arrays as ][ — normalize.
         joined = "[" + files_json.replace("][", ",") + "]"
         files = json.loads(joined) if joined.startswith("[[") else json.loads(files_json)
 
-    out: dict[str, str] = {}
+    import base64
+
+    def _fetch_at(repo_full_name: str, path: str, sha: str) -> str | None:
+        try:
+            content_json = subprocess.check_output(
+                ["gh", "api", f"repos/{repo_full_name}/contents/{path}?ref={sha}"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            meta = json.loads(content_json)
+            return base64.b64decode(meta["content"]).decode("utf-8", errors="replace")
+        except subprocess.CalledProcessError:
+            return None
+
+    head_files: dict[str, str] = {}
+    base_files: dict[str, str] = {}
     for f in files:
         path = f["filename"]
         if not path.endswith(".py"):
             continue
         if f.get("status") == "removed":
             continue
-        # Fetch file at head SHA via contents API.
-        try:
-            content_json = subprocess.check_output(
-                ["gh", "api", f"repos/{head_repo}/contents/{path}?ref={head_sha}"],
-                text=True,
-            )
-            meta = json.loads(content_json)
-            import base64
-            raw = base64.b64decode(meta["content"]).decode("utf-8", errors="replace")
-            out[path] = raw
-        except subprocess.CalledProcessError as e:
-            log.warning("could not fetch %s: %s", path, e)
-    return out
+        head = _fetch_at(head_repo, path, head_sha)
+        if head is None:
+            log.warning("could not fetch head-side %s", path)
+            continue
+        head_files[path] = head
+        # Newly added files won't exist on base — that's fine, we just
+        # won't have a "before" score for functions in them.
+        if f.get("status") != "added":
+            base = _fetch_at(base_repo, path, base_sha)
+            if base is not None:
+                base_files[path] = base
+    return head_files, base_files
 
 
 def _parse_diff_added_lines(unified_diff: str) -> dict[str, set[int]]:
@@ -191,6 +207,10 @@ def _line_body(entry: dict[str, Any], path: str) -> str:
     reason = entry.get("reason") or "SNN flagged this line."
     ctx = entry.get("context") or {}
     fn = ctx.get("function")
+    fn_score = ctx.get("function_score")
+    fn_score_before = ctx.get("function_score_before")
+    fn_delta = ctx.get("function_score_delta")
+    lineage = ctx.get("lineage") or []
 
     lines = [
         f"**Mr. Spiky** — score `{score:.2f}` (top 5% for senior Python code)",
@@ -199,11 +219,23 @@ def _line_body(entry: dict[str, Any], path: str) -> str:
         "",
     ]
     if fn:
-        fn_score = ctx.get("function_score")
         fn_msg = f"Inside `{fn}`"
         if fn_score is not None:
             fn_msg += f" — function-level score `{fn_score:.2f}`"
+        if fn_score_before is not None and fn_delta is not None:
+            arrow = "↑" if fn_delta > 0 else "↓"
+            sign = "+" if fn_delta > 0 else ""
+            fn_msg += (
+                f" ({arrow} {sign}{fn_delta:.2f} — was `{fn_score_before:.2f}`"
+                f" before your changes)"
+            )
         lines.append(fn_msg)
+    if lineage:
+        # Compact structural breadcrumb; the full sentence version is in the
+        # main reason above, this is the at-a-glance version.
+        crumb = " ⟶ ".join(str(entry.get("label", "")) for entry in reversed(lineage))
+        lines.append("")
+        lines.append(f"<sub>Structure: {crumb}</sub>")
     lines.append("")
     lines.append("<sub>Top axes: " + ", ".join(f"`{n}` {v:.2f}" for n, v in top_axes) + "</sub>")
     lines.append(
@@ -217,33 +249,66 @@ def _summary_body(
     flagged: list[dict[str, Any]],
     files_touched: int,
     file_verdicts: dict[str, str],
+    function_deltas: list[dict[str, Any]] | None = None,
 ) -> str:
-    if not flagged:
+    if not flagged and not function_deltas:
         return (
             "**Mr. Spiky** reviewed this PR and had no comments.\n\n"
             f"Scanned {files_touched} Python file(s); nothing crossed the "
             f"review threshold. This is a *complexity* review — Mr. Spiky "
             f"can't see semantic bugs (see the README)."
         )
-    lines = [
-        f"**Mr. Spiky** reviewed this PR — **{len(flagged)} line(s) flagged** across "
-        f"{files_touched} Python file(s).",
-        "",
-        "| file | line | score | reason |",
-        "| --- | ---: | ---: | --- |",
-    ]
-    for e in flagged:
-        r = (e.get("reason") or "").split(" — ")[0]  # first clause only
-        lines.append(f"| `{e['path']}` | {e['line']} | {e['score']:.2f} | {r} |")
-    lines.append("")
+    lines: list[str] = []
+    if flagged:
+        lines.append(
+            f"**Mr. Spiky** reviewed this PR — **{len(flagged)} line(s) flagged** "
+            f"across {files_touched} Python file(s)."
+        )
+        lines.append("")
+        lines.append("| file | line | score | reason |")
+        lines.append("| --- | ---: | ---: | --- |")
+        for e in flagged:
+            r = (e.get("reason") or "").split(" — ")[0]
+            lines.append(f"| `{e['path']}` | {e['line']} | {e['score']:.2f} | {r} |")
+        lines.append("")
+    if function_deltas:
+        lines.append("**Functions that got structurally gnarlier with this PR:**")
+        lines.append("")
+        lines.append("| function | file | before | after | Δ |")
+        lines.append("| --- | --- | ---: | ---: | ---: |")
+        for d in function_deltas:
+            delta = d["function_score_delta"]
+            arrow = "↑" if delta > 0 else "↓"
+            sign = "+" if delta > 0 else ""
+            lines.append(
+                f"| `{d['function']}` | `{d['path']}` | "
+                f"{d['function_score_before']:.2f} | {d['function_score']:.2f} | "
+                f"{arrow} {sign}{delta:.2f} |"
+            )
+        lines.append("")
     lines.append(
-        "<sub>Mr. Spiky is a spiking neural network trained on ~2600 functions "
+        "<sub>Mr. Spiky is a spiking neural network trained on ~2680 functions "
         "written by maintainers at CPython/Django/FastAPI/etc. It flags lines "
         "that look structurally *unusual* compared to that senior code — deep "
         "nesting, heavy delegation, tangled state. It cannot detect semantic "
-        "bugs (validated on PyResBugs at chance-level, honestly).</sub>",
+        "bugs (validated on PyResBugs at chance-level, honestly).</sub>"
     )
     return "\n".join(lines)
+
+
+def _base_function_scores(base_files: dict[str, str]) -> dict[tuple[str, str], float]:
+    """Map (path, function_name) → per-function SNN score on the BASE branch.
+
+    Uses the public `function_scores` helper from infer, which scores every
+    function regardless of whether any of its lines flag — critical because
+    a function that's clean on base won't have any per-line contexts to
+    read a score from, but we still need its baseline for the delta.
+    """
+    out: dict[tuple[str, str], float] = {}
+    for path, content in base_files.items():
+        for fn_name, score in function_scores(content).items():
+            out[(path, fn_name)] = score
+    return out
 
 
 def review(
@@ -251,11 +316,28 @@ def review(
     changed_lines: dict[str, set[int]],
     min_score: float,
     max_comments: int,
+    base_file_contents: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Score each file, filter to changed lines, produce inline + summary payloads."""
+    """Score each file, filter to changed lines, produce inline + summary payloads.
+
+    When `base_file_contents` is provided, we also score the base-side and
+    attach `function_score_before` + `function_score_delta` to each flagged
+    line's context, plus a "functions that got gnarlier" table to the
+    summary. This is what turns the bot from "line 42 is complex" into
+    "line 42's function went from 0.71 to 0.89 with your changes."
+    """
     all_flagged: list[dict[str, Any]] = []
     file_verdicts: dict[str, str] = {}
     files_actually_scored = 0
+
+    base_fn_scores = _base_function_scores(base_file_contents or {})
+    # Head-side per-function scores. Computed via the same public helper as
+    # base so both sides are apples-to-apples, and so we capture functions
+    # that don't have any flagged lines above min_score.
+    head_fn_scores: dict[tuple[str, str], float] = {}
+    for path, content in file_contents.items():
+        for fn_name, score in function_scores(content).items():
+            head_fn_scores[(path, fn_name)] = score
 
     for path, content in file_contents.items():
         result = analyze(content)
@@ -263,8 +345,6 @@ def review(
         files_actually_scored += 1
 
         changed_set = changed_lines.get(path, set())
-        if not changed_set:
-            continue
 
         for entry in result.get("lines", []):
             if not entry.get("flag"):
@@ -275,10 +355,43 @@ def review(
                 continue
             e = dict(entry)
             e["path"] = path
+            ctx = e.get("context") or {}
+            fn = ctx.get("function")
+            fn_score = ctx.get("function_score")
+            # Attach before/after fn scores if we have them.
+            if fn is not None:
+                before = base_fn_scores.get((path, fn))
+                if before is not None and fn_score is not None:
+                    e.setdefault("context", {})
+                    e["context"] = dict(e["context"])
+                    e["context"]["function_score_before"] = round(before, 4)
+                    e["context"]["function_score_delta"] = round(fn_score - before, 4)
             all_flagged.append(e)
 
     all_flagged.sort(key=lambda e: -e["score"])
     top = all_flagged[:max_comments]
+
+    # "Functions that got gnarlier" — independent of the flagged-line list.
+    # Threshold on the delta so we don't spam every function with a small
+    # score fluctuation. 0.05 is roughly one std of noise across runs.
+    _MIN_DELTA = 0.05
+    function_deltas: list[dict[str, Any]] = []
+    for (path, fn), after in head_fn_scores.items():
+        before = base_fn_scores.get((path, fn))
+        if before is None:
+            continue
+        delta = after - before
+        if delta < _MIN_DELTA:
+            continue
+        function_deltas.append({
+            "path": path,
+            "function": fn,
+            "function_score": round(after, 4),
+            "function_score_before": round(before, 4),
+            "function_score_delta": round(delta, 4),
+        })
+    function_deltas.sort(key=lambda d: -d["function_score_delta"])
+    function_deltas = function_deltas[:5]  # cap to keep the summary short
 
     inline_comments = [
         {
@@ -289,7 +402,7 @@ def review(
         }
         for e in top
     ]
-    summary_comment = _summary_body(top, files_actually_scored, file_verdicts)
+    summary_comment = _summary_body(top, files_actually_scored, file_verdicts, function_deltas)
 
     return {
         "summary": {
@@ -298,6 +411,7 @@ def review(
             "flagged_count": len(top),
             "total_flagged_before_cap": len(all_flagged),
             "files_touched": files_actually_scored,
+            "function_deltas": function_deltas,
             "min_score": min_score,
             "max_comments": max_comments,
             "top_flagged_lines": [
@@ -320,6 +434,11 @@ def main() -> int:
         "--root",
         help="local checkout root (only for --diff); files are read from disk",
     )
+    ap.add_argument(
+        "--base-root",
+        help="optional base-branch checkout root (--diff mode). When present, "
+             "review computes function_score_delta for each flagged line.",
+    )
     ap.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
     ap.add_argument("--max-comments", type=int, default=DEFAULT_MAX_COMMENTS)
     ap.add_argument(
@@ -332,20 +451,26 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    base_file_contents: dict[str, str] = {}
     if args.pr:
         diff = _fetch_pr_diff(args.pr)
-        file_contents = _fetch_pr_file_contents(args.pr)
+        file_contents, base_file_contents = _fetch_pr_file_contents(args.pr)
     else:
         diff = Path(args.diff).read_text()
         if not args.root:
             raise SystemExit("--root required with --diff")
         root = Path(args.root)
         file_contents = {}
-        # Only include files whose head-side content is on local disk.
         for touched in _parse_diff_added_lines(diff):
             p = root / touched
             if p.exists():
                 file_contents[touched] = p.read_text()
+        if args.base_root:
+            base_root = Path(args.base_root)
+            for touched in _parse_diff_added_lines(diff):
+                p = base_root / touched
+                if p.exists():
+                    base_file_contents[touched] = p.read_text()
 
     changed = _parse_diff_added_lines(diff)
     result = review(
@@ -353,6 +478,7 @@ def main() -> int:
         changed_lines=changed,
         min_score=args.min_score,
         max_comments=args.max_comments,
+        base_file_contents=base_file_contents,
     )
 
     if args.format == "json":

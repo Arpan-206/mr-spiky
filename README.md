@@ -60,7 +60,7 @@ uv sync
 ```bash
 just api            # FastAPI on :8000 (mock mode until weights are trained)
 just smoke          # POST a sample snippet to the running API
-just test           # pytest — 14 tests
+just test           # pytest — 15 tests
 
 just data-pretrain  # download senior corpus (~30s–3min, 149 files, ~2MB)
 just data-calib     # download PyResBugs + CodeComplex + mine annotations
@@ -131,7 +131,13 @@ Flagged line (all fields present):
   "context": {
     "function": "per_timestep_attribution",
     "span": [121, 189],
-    "function_score": 0.99
+    "function_score": 0.99,
+    "function_score_before": 0.71,
+    "function_score_delta": 0.28,
+    "lineage": [
+      {"kind": "If",  "label": "`if hidden_baseline is not None`", "line": 165},
+      {"kind": "FunctionDef", "label": "function `per_timestep_attribution`", "line": 121}
+    ]
   },
   "raw_features": {
     "nesting_depth": 1.0, "length": 0.1, "token_entropy": 0.59,
@@ -184,7 +190,7 @@ Top-level envelope:
 | `lines[i].flag` | bool | Whether `score ≥ threshold`. Threshold varies by mode — read it from `/health`. Use for the gutter marker / underline. |
 | `lines[i].axes` | dict<string, float> | Six axes, each ∈ [0,1] (may briefly exceed by ~5%). Radar chart or horizontal-bar breakdown per line. See axis glossary. |
 | `lines[i].reason` | string *(flagged only)* | Ready-to-display tooltip / hover text. Reads like reviewer feedback. |
-| `lines[i].context` | object *(flagged only)* | `{function, span: [start, end], function_score}`. `function_score` is the SNN's score for the enclosing function — great for "this line sits inside a function that's *also* gnarly." |
+| `lines[i].context` | object *(flagged only)* | `{function, span, function_score, function_score_before?, function_score_delta?, lineage}`. `function_score_before` / `function_score_delta` are only populated by the PR-review path (when a base branch is provided). `lineage` lists up to 3 innermost AST-node ancestors (function/for/if/try/etc.) with their labels and start lines — great for "this line sits inside `if x > 0` at L14, inside `for i in …` at L12." |
 | `lines[i].raw_features` | dict<string, float> *(flagged only)* | The 10 normalized inputs. Only render if you want a debug/expert view; the axes are what humans read. |
 
 ### Axis glossary
@@ -229,9 +235,19 @@ feature can contribute to multiple axes.
 Mr. Spiky runs as a reusable GitHub Actions workflow that reviews any pull
 request against your default branch. It posts:
 
-1. A **summary comment** at the top of the PR with a table of flagged lines.
-2. **Inline review comments** on the top-N most-flagged lines, each with
-   the axis breakdown, reason, and enclosing-function context.
+1. A **summary comment** at the top of the PR with:
+   - A table of flagged lines.
+   - A **"Functions that got structurally gnarlier"** table — before/after
+     SNN scores for functions whose score jumped by ≥0.05.
+2. **Inline review comments** on the top-N most-flagged lines, each with:
+   - The axis breakdown.
+   - A reasoning sentence that names *specific enclosing AST nodes* (e.g.
+     "this line sits inside `if strict` at L20, inside `if env_key in
+     context` at L17, inside `if allow_env and value.startswith('$')` at
+     L15").
+   - Function-level score with a **↑/↓ delta** vs the base branch's score
+     for the same function.
+   - A one-line structural breadcrumb (`outer ⟶ middle ⟶ inner`).
 
 ### Adopt in your repo
 

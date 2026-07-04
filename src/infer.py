@@ -24,6 +24,7 @@ from .features import (
     compute_axes,
     extract_function_features,
     extract_line_features,
+    line_lineage,
     normalize,
 )
 from .model import SpikyNet, ecdf_rescale, per_timestep_attribution, temporal_spike_attribution
@@ -235,15 +236,72 @@ def _reason_from_axes(axes: dict[str, float], top_k: int = 2, min_value: float =
     sorted_axes = sorted(axes.items(), key=lambda kv: -kv[1])
     drivers = [(name, val) for name, val in sorted_axes[:top_k] if val >= min_value]
     if not drivers:
-        # No axis stands out — fall back to the top axis alone.
         name, val = sorted_axes[0]
         return f"broadly elevated across axes; leader is {name} ({val:.2f})"
     if len(drivers) == 1:
         name, val = drivers[0]
         return f"high on {name} ({val:.2f}): {_AXIS_PHRASE.get(name, name)}"
-    parts = [f"{name} ({val:.2f}): {_AXIS_PHRASE.get(name, name)}" for name, val in drivers]
     return "high on " + " + ".join(f"{n} ({v:.2f})" for n, v in drivers) + \
         " — " + "; ".join(_AXIS_PHRASE.get(n, n) for n, _ in drivers)
+
+
+def _reason_from_axes_and_lineage(
+    axes: dict[str, float],
+    lineage: list[dict[str, object]],
+    line_no: int,
+) -> str:
+    """Extend the axis-only reason with concrete AST context, e.g.:
+
+        high on complexity (1.00) + hidden_calls (1.00) — deeply nested /
+        branchy control flow; delegates to opaque calls. Structurally: this
+        line sits inside `if x > 0` at L14, inside `for i in range(x)` at
+        L12, inside function `parse_config` at L5.
+
+    Two-part reason means a reviewer can skim just the first clause (axes)
+    or read the second (specific nodes) for the concrete "why."
+    """
+    base = _reason_from_axes(axes)
+    if not lineage:
+        return base
+    parts = []
+    for entry in lineage:
+        label = entry.get("label", "")
+        start = entry.get("line")
+        parts.append(f"{label} at L{start}")
+    joined = ", inside ".join(parts)
+    return f"{base}. Structurally: this line sits inside {joined}."
+
+
+def function_scores(code: str) -> dict[str, float]:
+    """Score every top-level function in `code` and return {name: score}.
+
+    Same computation as the `context.function_score` field in analyze(),
+    but returned for *every* function regardless of whether any of its
+    lines flagged. Used by the PR-review bot to compute before/after
+    deltas — a function that was clean on base won't have any flagged
+    lines to hang a context onto, so we need this direct entry point.
+    """
+    snn = _load_snn()
+    if snn is None:
+        return {}
+    functions = extract_function_features(code)
+    all_lines = extract_line_features(code)
+    out: dict[str, float] = {}
+    for fn in functions:
+        fn_lines = [lf for lf in all_lines if fn.lineno <= lf.line <= fn.end_lineno]
+        if not fn_lines:
+            continue
+        raw = _snn_scores_sequence(
+            snn["net"],
+            [lf.vector for lf in fn_lines],
+            hidden_baseline=snn["hidden_baseline"],
+            output_baseline=snn["output_baseline"],
+        )
+        if snn["ecdf_ref"] is not None:
+            raw = ecdf_rescale(raw, snn["ecdf_ref"])
+        if raw:
+            out[fn.name] = round(max(raw), 4)
+    return out
 
 
 def _function_contexts(
@@ -354,9 +412,16 @@ def analyze(code: str) -> dict[str, Any]:
         # Enrich flagged lines with reason + context + raw features. Non-flagged
         # lines keep the lean shape to avoid bloating long-file responses.
         if ln in flagged_set:
-            entry["reason"] = _reason_from_axes(axes_by_line.get(ln, {}))
+            lineage = line_lineage(code, ln, max_depth=3)
+            entry["reason"] = _reason_from_axes_and_lineage(
+                axes_by_line.get(ln, {}), lineage, ln,
+            )
             ctx = contexts_by_line.get(ln)
             if ctx is not None:
+                # Copy so we don't mutate the shared dict (multiple lines
+                # in the same function share the same context object).
+                ctx = dict(ctx)
+                ctx["lineage"] = lineage
                 entry["context"] = ctx
             entry["raw_features"] = raw_features_by_line.get(ln, {})
         lines_out.append(entry)

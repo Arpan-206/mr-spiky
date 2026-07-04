@@ -80,18 +80,24 @@ jobs:
             echo "no release asset found — running in mock mode"
           fi
 
-      - name: Fetch PR diff + head checkout
+      - name: Fetch PR diff + head/base checkouts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh pr diff ${{ github.event.pull_request.number }} \
             --repo ${{ github.repository }} \
             > pr.patch
-          # Mirror the PR head so review.py can read the full file contents.
-          # Use --repo to handle fork PRs correctly.
+          # Head checkout — post-change state, used for per-line scoring.
           gh repo clone ${{ github.event.pull_request.head.repo.full_name }} pr-checkout -- \
             --branch ${{ github.event.pull_request.head.ref }} \
             --depth 1
+          # Base checkout — pre-change state, used to compute
+          # `function_score_delta` (the "your changes made this function
+          # 20% gnarlier" signal). If cloning the base fails we still run;
+          # deltas are just not shown.
+          gh repo clone ${{ github.repository }} pr-base-checkout -- \
+            --branch ${{ github.event.pull_request.base.ref }} \
+            --depth 1 || echo "base checkout failed; deltas will be omitted"
 
       - name: Run Mr. Spiky review
         working-directory: mr-spiky
@@ -99,6 +105,7 @@ jobs:
           uv run python -m src.review \
             --diff ../pr.patch \
             --root ../pr-checkout \
+            $( [ -d ../pr-base-checkout ] && echo "--base-root ../pr-base-checkout" ) \
             --min-score ${{ inputs.min_score }} \
             --max-comments ${{ inputs.max_comments }} \
             --format json > ../review.json
