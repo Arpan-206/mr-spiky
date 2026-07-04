@@ -33,6 +33,7 @@ neurons which are usually quiet on senior-approved code.
 ## Contents
 
 - [What it detects (and honestly doesn't)](#what-it-detects-and-honestly-doesnt)
+- [The biological claim in 60 seconds](#the-biological-claim-in-60-seconds)
 - [Setup + Run](#setup--run)
 - [HTTP API for a frontend](#http-api-for-a-frontend)
 - [PR review bot](#pr-review-bot)
@@ -56,6 +57,47 @@ performs at 49.6% balanced accuracy, chance. That negative result is
 recorded in `models/threshold.json` and shown here, not swept aside.
 The one exception is *syntax* errors — the `parse_error` feature force-flags
 any line that doesn't parse, so `x = y` inside an `if` gets caught.
+
+## The biological claim in 60 seconds
+
+"Intuition Compiler" isn't a metaphor. Mr. Spiky runs on three concrete
+mechanisms that your brain also uses:
+
+**1. A neuron reads code like you do.** LIF (leaky integrate-and-fire)
+neurons accumulate potential from their inputs, leak between them, and
+spike when they cross threshold. Feed a function's lines in one at a
+time — the neuron carries context across lines and fires on the ones a
+reviewer would flinch at.
+
+![LIF membrane accumulating across code lines](docs/deck/assets/lif_membrane_over_lines.mp4)
+
+*A spiking neuron scans a real 14-line function from the CPython stdlib
+(`linecache.checkcache`) and flinches at the same bare-except line a
+reviewer would. ~30s.*
+
+**2. It learned by Hebbian rule — "neurons that fire together, wire
+together."** STDP (spike-timing-dependent plasticity) is the actual
+learning rule the mammalian brain uses. Feed the SNN 2,680 senior-
+authored Python functions and let neurons wire themselves according to
+which patterns co-fire. No gradient descent. No labels. No teacher.
+Different neurons end up specialized on different structural patterns.
+
+![STDP: A→B strengthens on exception handling, A→C stays weak](docs/deck/assets/stdp_learning_rule.mp4)
+
+*Three neurons; over six exposures A→B strengthens on exception-handling
+patterns while A→C stays weak. Visual proof of differential
+specialization from the same Hebbian rule. ~30s.*
+
+**3. It reads temporally, not all-at-once.** A senior developer's gut
+fires at line 47 because of what they read through line 46. LIF membrane
+potential accumulates over time in exactly that way. Feeding code as a
+temporal stream (one line = one timestep) gives per-line scores that
+depend on prior context — which no per-line MLP can produce.
+
+These three ideas are what make "encoding senior intuition" a concrete
+architectural claim, not a marketing line. The clips above (rendered
+with Manim) are what we use in the live pitch — you can render them
+locally with `just deck-clips` if you want to iterate.
 
 ## Setup + Run
 
