@@ -1,26 +1,32 @@
 """
-Mr. Spiky pitch clip 2: STDP — "neurons that fire together wire together" (~15s).
+Mr. Spiky pitch clip 2: "This is how your brain learns. It's how Mr. Spiky
+learned too." (~22s)
 
-Beat to land: Spike-Timing-Dependent Plasticity is the biological learning rule
-Mr. Spiky uses. If A fires BEFORE B, the A->B connection strengthens
-(potentiation, dw > 0). If A fires AFTER B, the A->B connection weakens
-(depression, dw < 0). Repeat this rule across thousands of senior-authored
-functions and the network's weights become a structural fingerprint of good
-code — no gradient descent, no labels.
+Three beats:
 
-Preserve these visual invariants when editing:
-  1. The arrow thickness = the weight. It MUST visibly thicken in beat 1 and
-     thin in beat 2. If a reviewer can't tell the difference, the point is
-     lost. Do not swap this out for a numeric label alone.
-  2. In beat 1 the ORDER is A-then-B; in beat 2 it is B-then-A. Getting this
-     backwards inverts the sign of the rule — do not "clean up" by making
-     both beats symmetric in the wrong direction.
-  3. Implementation constants (A- = 0.020, A+ = 0.005, multiplicative
-     depression) are deliberately NOT on screen. The pitch is about the
-     concept, not the hyperparameters.
+1. (0-7s) Two neurons. They co-fire on senior code, over and over. Each
+   co-fire slightly thickens the wire between them. Do this 8 times.
+   The audience watches wiring emerge without labels, without a teacher.
+
+2. (7-14s) Zoom out. A grid of similar neuron pairs, all self-organizing
+   the same way, in parallel. Text arrives: "Neurons that fire together
+   wire together." — Donald Hebb, 1949. (The moment the analogy becomes
+   concrete instead of metaphorical.)
+
+3. (14-22s) Punchline: "this is how your visual cortex learned to read.
+   and it's how Mr. Spiky learned senior Python." Optional small tag: "no
+   teacher. no labels. no gradient descent."
+
+Design invariants:
+  * The wire's thickness change MUST be visible each iteration. If it's
+    too subtle the "wiring emerges" story doesn't read.
+  * The Hebb quote arrives ONLY in beat 2 after the audience has already
+    seen the mechanism. Landing the words on the mechanism is the wow.
+  * Beat 3's punchline is the whole payoff — hold the final frame longer
+    (2s) so it sticks.
 
 Render:
-    manim -pqm stdp_learning_rule.py STDPLearningRule
+    manim -qm stdp_learning_rule.py STDPLearningRule
 """
 
 from manim import (
@@ -32,13 +38,14 @@ from manim import (
     DashedLine,
     Dot,
     VGroup,
+    Rectangle,
     Write,
     FadeIn,
     FadeOut,
     Flash,
     Create,
     Transform,
-    ReplacementTransform,
+    Indicate,
     UP,
     DOWN,
     LEFT,
@@ -47,264 +54,241 @@ from manim import (
     WHITE,
     GRAY,
     YELLOW,
-    ORANGE,
     GREEN,
     RED,
-    BLUE_B,
-    BLACK,
-    config,
 )
+import numpy as np
 
 
-config.background_color = "#0b0d12"
+BG        = "#0f0f0f"
+SPIKE     = "#ffd54a"
+DIM       = "#8a8a92"
+NEURON_C  = "#ffd54a"
+WIRE_C    = "#5a5a62"
+WIRE_HOT  = "#ffd54a"
 
 
 class STDPLearningRule(Scene):
-    def construct(self) -> None:
-        # ------------------------------------------------------------------
-        # Faint background grid of neurons to hint at scale (used in beat 3).
-        # Kept static; we don't animate all of them.
-        # ------------------------------------------------------------------
-        bg_neurons = VGroup()
-        for row in range(-2, 3):
-            for col in range(-5, 6):
-                if row == 0 and col in (-1, 1):
-                    # Leave gaps where the focal neurons will sit.
-                    continue
-                d = Dot(radius=0.09, color=BLUE_B).set_opacity(0.12)
-                d.move_to(RIGHT * col * 1.1 + UP * row * 1.1)
-                bg_neurons.add(d)
-        # Don't add yet; we fade it in during beat 3.
+    def construct(self):
+        self.camera.background_color = BG
 
-        # ------------------------------------------------------------------
-        # Focal neurons A and B with a weighted arrow between them.
-        # ------------------------------------------------------------------
-        neuron_a = Circle(radius=0.55, color=BLUE_B, fill_opacity=0.3)
+        # ==================================================================
+        # BEAT 1 — Two neurons, repeated co-firing thickens the wire (0-7s)
+        # ==================================================================
+
+        # Two neurons, A on the left, B on the right.
+        neuron_a = Circle(radius=0.36, color=NEURON_C, stroke_width=3).set_fill(NEURON_C, opacity=0.15)
         neuron_a.move_to(LEFT * 2.2)
-        label_a = Text("A", font_size=32, color=WHITE).move_to(neuron_a.get_center())
+        label_a = Text("A", font_size=22, color=NEURON_C, weight="BOLD").move_to(neuron_a.get_center())
 
-        neuron_b = Circle(radius=0.55, color=BLUE_B, fill_opacity=0.3)
+        neuron_b = Circle(radius=0.36, color=NEURON_C, stroke_width=3).set_fill(NEURON_C, opacity=0.15)
         neuron_b.move_to(RIGHT * 2.2)
-        label_b = Text("B", font_size=32, color=WHITE).move_to(neuron_b.get_center())
+        label_b = Text("B", font_size=22, color=NEURON_C, weight="BOLD").move_to(neuron_b.get_center())
 
-        def make_arrow(thickness: float) -> Arrow:
-            return Arrow(
-                start=neuron_a.get_right(),
-                end=neuron_b.get_left(),
-                buff=0.05,
-                color=WHITE,
-                stroke_width=thickness,
-                max_tip_length_to_length_ratio=0.08,
+        # The connecting wire. Starts thin, gets thicker.
+        wire = Line(
+            neuron_a.get_right(), neuron_b.get_left(),
+            color=WIRE_C, stroke_width=2,
+        )
+
+        # An "exposure counter" — small, unobtrusive, so audience sees
+        # the number of senior-code exposures ticking up.
+        counter_label = Text("exposures:", font_size=16, color=DIM).to_edge(DOWN, buff=0.6).shift(LEFT * 1.2)
+        counter_val = Text("0", font_size=20, color=SPIKE).next_to(counter_label, RIGHT, buff=0.2)
+
+        self.play(
+            FadeIn(neuron_a), FadeIn(label_a),
+            FadeIn(neuron_b), FadeIn(label_b),
+            Create(wire),
+            FadeIn(counter_label), FadeIn(counter_val),
+            run_time=0.9,
+        )
+
+        # 8 repeated exposures: A fires, then B fires shortly after,
+        # wire thickens each time. Small delta per iteration is visible
+        # cumulatively.
+        NUM_EXPOSURES = 8
+        for i in range(NUM_EXPOSURES):
+            # A fires first.
+            self.play(
+                neuron_a.animate.set_stroke(SPIKE, width=6).set_fill(SPIKE, opacity=0.55),
+                Flash(neuron_a, color=SPIKE, flash_radius=0.55, num_lines=10, line_length=0.15),
+                run_time=0.18,
+            )
+            # A relaxes as B fires.
+            self.play(
+                neuron_a.animate.set_stroke(NEURON_C, width=3).set_fill(NEURON_C, opacity=0.15),
+                neuron_b.animate.set_stroke(SPIKE, width=6).set_fill(SPIKE, opacity=0.55),
+                Flash(neuron_b, color=SPIKE, flash_radius=0.55, num_lines=10, line_length=0.15),
+                run_time=0.22,
+            )
+            # Wire thickens. Also color-shifts slightly toward hot on strong exposures.
+            new_width = 2 + (i + 1) * 1.5   # 3.5, 5, 6.5, ... 14
+            fraction = (i + 1) / NUM_EXPOSURES
+            wire_color = interpolate_hex(WIRE_C, WIRE_HOT, fraction)
+            new_wire = Line(
+                neuron_a.get_right(), neuron_b.get_left(),
+                color=wire_color, stroke_width=new_width,
+            )
+            new_counter = Text(str(i + 1), font_size=20, color=SPIKE).next_to(counter_label, RIGHT, buff=0.2)
+            self.play(
+                neuron_b.animate.set_stroke(NEURON_C, width=3).set_fill(NEURON_C, opacity=0.15),
+                Transform(wire, new_wire),
+                Transform(counter_val, new_counter),
+                run_time=0.18,
             )
 
-        arrow = make_arrow(6.0)
-        # Text instead of MathTex — avoids requiring a system LaTeX install.
-        # A single-character italic-ish "w" reads fine at this size.
-        w_label = Text("w", font_size=32, color=WHITE, slant="ITALIC")
-        w_label.next_to(arrow, UP, buff=0.15)
+        # Small pause so audience registers the emerged connection.
+        self.wait(0.5)
 
-        title = Text("STDP: spike-timing-dependent plasticity", font_size=26, color=GRAY)
-        title.to_edge(UP, buff=0.4)
+        # ==================================================================
+        # BEAT 2 — Zoom out to a grid of pairs + the Hebb quote (7-14s)
+        # ==================================================================
 
-        self.play(FadeIn(title), run_time=0.4)
+        # Move the focal pair up so we have room for the grid + quote.
+        focal_group = VGroup(neuron_a, label_a, neuron_b, label_b, wire)
         self.play(
-            Create(neuron_a),
-            Create(neuron_b),
-            FadeIn(label_a),
-            FadeIn(label_b),
+            focal_group.animate.scale(0.55).shift(UP * 1.8 + LEFT * 3.0),
+            FadeOut(counter_label), FadeOut(counter_val),
+            run_time=0.7,
+        )
+
+        # Create a grid of smaller pair-plus-wire units around the focal
+        # pair. Each pair fires on its own random rhythm, with wires
+        # thickening a bit before fade-in completes — the point is "this
+        # is happening in parallel, everywhere, on all pairs."
+        rng = np.random.default_rng(7)
+        pair_groups = []
+        for row in range(3):
+            for col in range(5):
+                if row == 0 and col == 0:
+                    continue   # skip focal position
+                cx = -3.6 + col * 1.6
+                cy = 1.0 - row * 1.4
+                # Two dots, wire.
+                a = Circle(radius=0.16, color=NEURON_C, stroke_width=2).set_fill(NEURON_C, opacity=0.15)
+                a.move_to(np.array([cx - 0.4, cy, 0]))
+                b = Circle(radius=0.16, color=NEURON_C, stroke_width=2).set_fill(NEURON_C, opacity=0.15)
+                b.move_to(np.array([cx + 0.4, cy, 0]))
+                # Wire thickness varies — some pairs have wired up more than others.
+                thickness = 1.0 + rng.random() * 4.5
+                colr = interpolate_hex(WIRE_C, WIRE_HOT, thickness / 5.5)
+                w = Line(a.get_right(), b.get_left(), color=colr, stroke_width=thickness)
+                pair_groups.append(VGroup(a, b, w))
+
+        # Fade the grid in as a wave.
+        for pg in pair_groups:
+            self.play(FadeIn(pg), run_time=0.04)
+        self.wait(0.3)
+
+        # Trigger a few random pair-fires so the grid looks alive.
+        for _ in range(6):
+            pg = pair_groups[int(rng.integers(0, len(pair_groups)))]
+            a_circle, b_circle, _ = pg
+            self.play(
+                a_circle.animate.set_stroke(SPIKE, width=3).set_fill(SPIKE, opacity=0.6),
+                b_circle.animate.set_stroke(SPIKE, width=3).set_fill(SPIKE, opacity=0.6),
+                run_time=0.1,
+            )
+            self.play(
+                a_circle.animate.set_stroke(NEURON_C, width=2).set_fill(NEURON_C, opacity=0.15),
+                b_circle.animate.set_stroke(NEURON_C, width=2).set_fill(NEURON_C, opacity=0.15),
+                run_time=0.1,
+            )
+
+        # The Hebb quote. Small, quiet, arrives after mechanism is on screen.
+        quote_line1 = Text(
+            '"Neurons that fire together,',
+            font_size=26, color=WHITE, slant="ITALIC",
+        )
+        quote_line2 = Text(
+            'wire together."',
+            font_size=26, color=SPIKE, slant="ITALIC",
+        )
+        quote_attrib = Text(
+            "— Donald Hebb, 1949",
+            font_size=16, color=DIM,
+        )
+        quote_group = VGroup(quote_line1, quote_line2, quote_attrib).arrange(DOWN, buff=0.15)
+        quote_group.to_edge(DOWN, buff=0.7)
+
+        self.play(FadeIn(quote_line1), run_time=0.4)
+        self.play(FadeIn(quote_line2), run_time=0.4)
+        self.play(FadeIn(quote_attrib), run_time=0.3)
+        self.wait(1.2)
+
+        # ==================================================================
+        # BEAT 3 — Punchline (14-22s)
+        # ==================================================================
+        self.play(
+            FadeOut(quote_group),
+            *[FadeOut(pg) for pg in pair_groups],
             run_time=0.6,
         )
-        self.play(Create(arrow), FadeIn(w_label), run_time=0.4)
-
-        # ------------------------------------------------------------------
-        # Small timeline underneath for the delta-t marker.
-        # ------------------------------------------------------------------
-        timeline = Line(LEFT * 3.5, RIGHT * 3.5, color=GRAY, stroke_width=2)
-        timeline.to_edge(DOWN, buff=1.8)
-        t_label = Text("time", font_size=18, color=GRAY)
-        t_label.next_to(timeline, RIGHT, buff=0.1)
-
-        self.play(Create(timeline), FadeIn(t_label), run_time=0.3)
-
-        # ==================================================================
-        # BEAT 1 — Potentiation: A fires, then B fires. Arrow thickens.
-        # ==================================================================
-        beat1_caption = Text(
-            "A fires, then B fires — connection strengthens.",
-            font_size=24,
-            color=WHITE,
-        )
-        beat1_caption.next_to(timeline, DOWN, buff=0.35)
-
-        self.play(FadeIn(beat1_caption), run_time=0.3)
-
-        # Spike A.
-        tick_a1 = Line(UP * 0.15, DOWN * 0.15, color=YELLOW, stroke_width=3)
-        tick_a1.move_to(timeline.point_from_proportion(0.35))
-        tick_a1_label = Text("A", font_size=18, color=YELLOW).next_to(tick_a1, UP, buff=0.05)
-
-        neuron_a.set_fill(YELLOW, opacity=0.9)
+        # Move focal pair back to center for the final frame.
         self.play(
-            Flash(neuron_a, color=YELLOW, flash_radius=0.85, num_lines=14),
-            Create(tick_a1),
-            FadeIn(tick_a1_label),
-            run_time=0.4,
+            focal_group.animate.scale(1.6).move_to(ORIGIN + UP * 0.2),
+            run_time=0.6,
         )
-        self.play(neuron_a.animate.set_fill(BLUE_B, opacity=0.3), run_time=0.2)
 
-        self.wait(0.25)
-
-        # Spike B (shortly after).
-        tick_b1 = Line(UP * 0.15, DOWN * 0.15, color=YELLOW, stroke_width=3)
-        tick_b1.move_to(timeline.point_from_proportion(0.55))
-        tick_b1_label = Text("B", font_size=18, color=YELLOW).next_to(tick_b1, UP, buff=0.05)
-
-        neuron_b.set_fill(YELLOW, opacity=0.9)
-        self.play(
-            Flash(neuron_b, color=YELLOW, flash_radius=0.85, num_lines=14),
-            Create(tick_b1),
-            FadeIn(tick_b1_label),
-            run_time=0.4,
+        line1 = Text(
+            "this is how your visual cortex",
+            font_size=24, color=WHITE,
         )
-        self.play(neuron_b.animate.set_fill(BLUE_B, opacity=0.3), run_time=0.2)
-
-        # Delta-t bracket.
-        dt_line = DashedLine(
-            tick_a1.get_bottom() + DOWN * 0.15,
-            tick_b1.get_bottom() + DOWN * 0.15,
-            color=GRAY,
-            stroke_width=2,
-            dash_length=0.08,
+        line2 = Text(
+            "learned to read.",
+            font_size=24, color=WHITE,
         )
-        dt_label = Text("Δt", font_size=26, color=GRAY)
-        dt_label.next_to(dt_line, DOWN, buff=0.05)
-
-        self.play(Create(dt_line), FadeIn(dt_label), run_time=0.3)
-
-        # Thicken arrow: w increases.
-        arrow_thick = make_arrow(12.0).set_color(GREEN)
-        dw_pos = Text("Δw > 0", font_size=28, color=GREEN)
-        dw_pos.next_to(arrow_thick, UP, buff=0.35)
-
-        self.play(
-            ReplacementTransform(arrow, arrow_thick),
-            w_label.animate.set_color(GREEN),
-            FadeIn(dw_pos, shift=UP * 0.1),
-            run_time=0.7,
+        line3 = Text(
+            "and it's how Mr. Spiky",
+            font_size=24, color=WHITE,
         )
-        arrow = arrow_thick  # rebind for beat 2
+        line4 = Text(
+            "learned senior Python.",
+            font_size=26, color=SPIKE,
+        )
+        block = VGroup(line1, line2, line3, line4).arrange(DOWN, buff=0.15)
+        block.to_edge(DOWN, buff=0.5)
+
+        self.play(FadeIn(line1), FadeIn(line2), run_time=0.5)
+        self.wait(0.4)
+        self.play(FadeIn(line3), FadeIn(line4), run_time=0.5)
         self.wait(0.6)
 
-        # Clear beat 1 ticks/caption.
+        # Micro-tag underneath, small.
+        micro = Text(
+            "no teacher. no labels. no gradient descent.",
+            font_size=15, color=DIM,
+        ).next_to(block, DOWN, buff=0.25)
+        self.play(FadeIn(micro), run_time=0.4)
+
+        self.wait(2.0)
+
+        # Clean fade.
         self.play(
-            FadeOut(tick_a1),
-            FadeOut(tick_a1_label),
-            FadeOut(tick_b1),
-            FadeOut(tick_b1_label),
-            FadeOut(dt_line),
-            FadeOut(dt_label),
-            FadeOut(dw_pos),
-            FadeOut(beat1_caption),
-            run_time=0.4,
-        )
-
-        # ==================================================================
-        # BEAT 2 — Depression: B fires first, then A. Arrow thins.
-        # ==================================================================
-        beat2_caption = Text(
-            "B fires, then A — connection weakens.",
-            font_size=24,
-            color=WHITE,
-        )
-        beat2_caption.next_to(timeline, DOWN, buff=0.35)
-
-        self.play(FadeIn(beat2_caption), run_time=0.3)
-
-        # Spike B first this time.
-        tick_b2 = Line(UP * 0.15, DOWN * 0.15, color=YELLOW, stroke_width=3)
-        tick_b2.move_to(timeline.point_from_proportion(0.35))
-        tick_b2_label = Text("B", font_size=18, color=YELLOW).next_to(tick_b2, UP, buff=0.05)
-
-        neuron_b.set_fill(YELLOW, opacity=0.9)
-        self.play(
-            Flash(neuron_b, color=YELLOW, flash_radius=0.85, num_lines=14),
-            Create(tick_b2),
-            FadeIn(tick_b2_label),
-            run_time=0.4,
-        )
-        self.play(neuron_b.animate.set_fill(BLUE_B, opacity=0.3), run_time=0.2)
-
-        self.wait(0.25)
-
-        # Then A fires.
-        tick_a2 = Line(UP * 0.15, DOWN * 0.15, color=YELLOW, stroke_width=3)
-        tick_a2.move_to(timeline.point_from_proportion(0.55))
-        tick_a2_label = Text("A", font_size=18, color=YELLOW).next_to(tick_a2, UP, buff=0.05)
-
-        neuron_a.set_fill(YELLOW, opacity=0.9)
-        self.play(
-            Flash(neuron_a, color=YELLOW, flash_radius=0.85, num_lines=14),
-            Create(tick_a2),
-            FadeIn(tick_a2_label),
-            run_time=0.4,
-        )
-        self.play(neuron_a.animate.set_fill(BLUE_B, opacity=0.3), run_time=0.2)
-
-        # Thin arrow: w decreases.
-        arrow_thin = make_arrow(3.0).set_color(RED)
-        dw_neg = Text("Δw < 0", font_size=28, color=RED)
-        dw_neg.next_to(arrow_thin, UP, buff=0.35)
-
-        self.play(
-            ReplacementTransform(arrow, arrow_thin),
-            w_label.animate.set_color(RED),
-            FadeIn(dw_neg, shift=UP * 0.1),
-            run_time=0.7,
-        )
-        arrow = arrow_thin
-        self.wait(0.6)
-
-        # Clear beat 2 elements before the closing beat.
-        self.play(
-            FadeOut(tick_a2),
-            FadeOut(tick_a2_label),
-            FadeOut(tick_b2),
-            FadeOut(tick_b2_label),
-            FadeOut(dw_neg),
-            FadeOut(beat2_caption),
-            FadeOut(timeline),
-            FadeOut(t_label),
-            run_time=0.4,
-        )
-
-        # ==================================================================
-        # BEAT 3 — Zoom out (visually): faint grid of many neurons + pitch.
-        # ==================================================================
-        # Bring in the background grid behind everything.
-        self.add(bg_neurons)
-        bg_neurons.set_opacity(0.0)
-        self.play(
-            bg_neurons.animate.set_opacity(0.18),
-            # Shrink the focal pair a touch to imply "zoom out."
-            VGroup(neuron_a, neuron_b, label_a, label_b, arrow, w_label)
-            .animate.scale(0.75),
+            FadeOut(block),
+            FadeOut(micro),
+            FadeOut(focal_group),
             run_time=0.8,
         )
 
-        pitch = Text(
-            "Repeat this on 2,680 senior-authored functions.\n"
-            "No gradient descent. No labels.\n"
-            "The network's weights become the shape of senior code.",
-            font_size=26,
-            color=WHITE,
-            line_spacing=0.9,
-        )
-        pitch.to_edge(DOWN, buff=0.5)
 
-        self.play(FadeIn(pitch, shift=UP * 0.2), run_time=0.8)
-        self.wait(2.4)
-        self.play(FadeOut(pitch), run_time=0.5)
+# ---------------------------------------------------------------------------
+# Helper — interpolate between two hex colors. Kept inline so this file has
+# zero non-manim deps.
+# ---------------------------------------------------------------------------
+def interpolate_hex(c1: str, c2: str, t: float) -> str:
+    t = max(0.0, min(1.0, t))
+    def hex_to_rgb(h):
+        h = h.lstrip("#")
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    r1, g1, b1 = hex_to_rgb(c1)
+    r2, g2, b2 = hex_to_rgb(c2)
+    r = round(r1 + (r2 - r1) * t)
+    g = round(g1 + (g2 - g1) * t)
+    b = round(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 if __name__ == "__main__":
-    print("Render with: manim -pqm stdp_learning_rule.py STDPLearningRule")
+    print("Render with: manim -qm stdp_learning_rule.py STDPLearningRule")
