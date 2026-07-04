@@ -39,11 +39,26 @@ _THRESHOLD_PATH = _MODELS_DIR / "threshold.json"
 
 # Weights used to collapse normalized features into a single suspicion score
 # in mock mode. Hand-picked, ordered to match FEATURE_NAMES in features.py.
-# nesting_depth + cyclomatic_proxy dominate; the new (use_def, call_graph)
-# dims get moderate weight; length + exception_density are near-noise.
-# parse_error gets the largest single weight — code that doesn't even parse
-# should dominate the mock linear score, not just nudge it.
-_MOCK_WEIGHTS: tuple[float, ...] = (0.20, 0.05, 0.05, 0.05, 0.15, 0.10, 0.10, 0.10, 0.05, 0.50)
+# parse_error dominates — code that doesn't even parse should overpower
+# every other signal. The three cross-function features are given moderate
+# weight in mock: they're novel signal but often zero (only fire on lines
+# with actual cross-scope reach), so they can't lead the score unless a
+# real reach pattern is present.
+_MOCK_WEIGHTS: tuple[float, ...] = (
+    0.15,  # nesting_depth
+    0.03,  # length
+    0.05,  # token_entropy
+    0.05,  # naming_entropy
+    0.12,  # cyclomatic_proxy
+    0.08,  # use_def_distance
+    0.08,  # name_flow
+    0.10,  # call_graph_shape
+    0.05,  # exception_density
+    0.50,  # parse_error (dominant)
+    0.10,  # global_reach (new: cross-function reach)
+    0.08,  # attr_reach (new: cross-method reach)
+    0.06,  # call_graph_depth (new: same-file call chain depth)
+)
 assert len(_MOCK_WEIGHTS) == NUM_FEATURES, "mock weights out of sync with features"
 _MOCK_THRESHOLD = 0.55
 
@@ -347,8 +362,57 @@ def _function_contexts(
     return contexts
 
 
-def analyze(code: str) -> dict[str, Any]:
-    """Return the fixed JSON schema for a given code string."""
+def _apply_axis_weights(
+    score: float,
+    axes: dict[str, float],
+    weights: dict[str, float] | None,
+) -> float:
+    """Reshape `score` using per-axis weights so teams can tune what the
+    SNN treats as suspicious.
+
+    The score comes from the SNN (or the mock linear model) and already
+    represents "how surprising this line is." Axis weights let a team say
+    "when the SNN sees exception_surface fire, take it more seriously"
+    (weight > 1.0) or "we don't care about naming density" (weight < 1.0).
+
+    Concretely: compute a boost factor as the weighted mean of axis
+    weights, using the current axis firing strengths as importance. If
+    no axes are firing (all zero) or no custom weights are provided, boost
+    is 1.0 (no-op) and we return the raw score unchanged.
+
+    The result is clamped to [0, 1] so weight = 3.0 doesn't accidentally
+    push flat scores over the threshold — a weight is a *reshape*, not a
+    force-flag override.
+    """
+    if not weights or not axes:
+        return score
+    # Normalize to a boost centered around 1.0. Missing axes default to
+    # weight 1.0 (no change) so a team only needs to specify what they
+    # care to adjust — not the full six-axis table.
+    total_strength = 0.0
+    weighted_strength = 0.0
+    for axis, strength in axes.items():
+        w = float(weights.get(axis, 1.0))
+        total_strength += strength
+        weighted_strength += strength * w
+    if total_strength <= 1e-6:
+        return score
+    boost = weighted_strength / total_strength
+    return max(0.0, min(1.0, score * boost))
+
+
+def analyze(
+    code: str,
+    axis_weights: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Return the fixed JSON schema for a given code string.
+
+    `axis_weights` (optional): per-axis multiplicative weights (default
+    1.0 each) that let a team tune what the model treats as suspicious.
+    E.g. `{"exception_surface": 1.5, "naming": 0.6}` boosts exception-heavy
+    lines and quiets naming-driven flags. Only the axes you name are
+    changed — the rest stay at 1.0. See `_apply_axis_weights`.
+    """
     line_feats = extract_line_features(code)
 
     snn = _load_snn()
@@ -394,6 +458,15 @@ def analyze(code: str) -> dict[str, Any]:
         lf.line: {name: round(v, 4) for name, v in zip(FEATURE_NAMES, normalize(lf.vector))}
         for lf in line_feats
     }
+
+    # Per-team axis weight reshape. Applied after parse_error override so
+    # a syntax-broken line still saturates (weight 0.0 on `malformed` won't
+    # silence it — that would defeat the point of a hard override).
+    if axis_weights:
+        scores = [
+            (ln, sc if ln in parse_error_lines else _apply_axis_weights(sc, axes_by_line.get(ln, {}), axis_weights))
+            for ln, sc in scores
+        ]
     # Enclosing-function contexts (only computed for flagged lines to keep the
     # extra SNN passes proportional to the interesting work).
     contexts_by_line = _function_contexts(code, snn, threshold)

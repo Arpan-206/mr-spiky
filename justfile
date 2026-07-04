@@ -58,6 +58,12 @@ review-pr repo pr:
 review-diff diff root:
     uv run python3 -m src.review --diff {{diff}} --root {{root}} --format human
 
+# Score every Python file under a directory; prints the top-N gnarliest lines.
+#   just repo-review path/to/repo
+#   just repo-review path/to/repo 30 0.85
+repo-review root top_n="20" min_score="0.9":
+    uv run python3 -m src.repo {{root}} --top-n {{top_n}} --min-score {{min_score}}
+
 # --- Release packaging ---
 # Package trained model artifacts for the GitHub Action to download.
 # Produces models.tar.gz + a SHA-256 checksum. Attach both to a release with

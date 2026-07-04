@@ -39,6 +39,12 @@ PRETRAIN_PATH = _SENIOR_CORPUS if _SENIOR_CORPUS.exists() else _CSN_CORPUS
 LABELED_PATH = ROOT / "data" / "mlcq_labeled.json"  # PyResBugs-populated
 CODECOMPLEX_PATH = ROOT / "data" / "codecomplex_labeled.json"
 ANNOTATIONS_PATH = ROOT / "data" / "annotations_labeled.json"
+# pylint-mined labels: functions from the senior corpus that trip
+# refactoring checks (too-many-branches, too-complex, etc.). Different
+# heuristic from our SNN → an independent second opinion for measuring
+# whether the cross-function features (global_reach, attr_reach,
+# call_graph_depth) actually help.
+PYLINT_PATH = ROOT / "data" / "pylint_labeled.json"
 WEIGHTS_PATH = ROOT / "models" / "snn_weights.pt"
 BASELINES_PATH = ROOT / "models" / "snn_baselines.pt"
 ECDF_PATH = ROOT / "models" / "snn_ecdf.pt"
@@ -356,6 +362,14 @@ def calibrate() -> None:
     annotations_block = _labeled_block(ANNOTATIONS_PATH, "Annotations (senior judgments)")
     if annotations_block:
         result["annotations_stats"] = annotations_block
+
+    # pylint (independent second-opinion: refactoring family — too-complex,
+    # too-many-*) — designed to measure whether the cross-function features
+    # (global_reach, attr_reach, call_graph_depth) capture signal that our
+    # `# noqa`-based annotations set does not.
+    pylint_block = _labeled_block(PYLINT_PATH, "pylint (second opinion)")
+    if pylint_block:
+        result["pylint_stats"] = pylint_block
 
     THRESHOLD_PATH.parent.mkdir(parents=True, exist_ok=True)
     THRESHOLD_PATH.write_text(json.dumps(result, indent=2))

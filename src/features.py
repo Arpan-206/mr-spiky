@@ -49,6 +49,11 @@ FEATURE_NAMES: tuple[str, ...] = (
     "call_graph_shape",
     "exception_density",
     "parse_error",
+    # Cross-function data-flow features (added after 10-dim baseline). These
+    # capture reach that `use_def_distance` (function-local) misses:
+    "global_reach",       # max line distance to a module-level def a line references
+    "attr_reach",         # max line distance to a self.attr def in the same class
+    "call_graph_depth",   # depth of transitive same-file call chain reachable from a line's calls
 )
 NUM_FEATURES = len(FEATURE_NAMES)
 
@@ -61,8 +66,15 @@ NUM_FEATURES = len(FEATURE_NAMES)
 # would flag the line.
 AXIS_DEFINITIONS: dict[str, tuple[str, ...]] = {
     "complexity":         ("nesting_depth", "cyclomatic_proxy", "length"),
-    "tangled_state":      ("use_def_distance", "name_flow"),
-    "hidden_calls":       ("call_graph_shape",),
+    # tangled_state now also covers *cross-function* state reach — a line
+    # that reads a module-level global or a self.attr defined far away is
+    # tangled in the way this axis is trying to name, even if the local
+    # use_def_distance is small.
+    "tangled_state":      ("use_def_distance", "name_flow", "global_reach", "attr_reach"),
+    # hidden_calls now includes the transitive depth of same-file calls
+    # this line reaches — one function call that recurses two levels down
+    # is more "hidden" than a single library call.
+    "hidden_calls":       ("call_graph_shape", "call_graph_depth"),
     "exception_surface":  ("exception_density",),
     "naming":             ("token_entropy", "naming_entropy"),
     "malformed":          ("parse_error",),
@@ -114,6 +126,9 @@ _FEATURE_CAPS: dict[str, float] = {
     "call_graph_shape": 4.0,    # LOCAL: call weight on this line; multi-call lines are gnarly
     "exception_density": 0.5,   # exception nodes / body_size ratio; capped at 0.5
     "parse_error": 1.0,         # already 0/1, cap is a no-op
+    "global_reach": 100.0,      # a line reading a global defined 100 lines away is very tangled
+    "attr_reach": 80.0,         # self.attr defined 80 lines away in the class body is similarly tangled
+    "call_graph_depth": 4.0,    # depth-4 call chain within the same file is the ceiling we count
 }
 
 _BRANCHING_NODES: tuple[type, ...] = (
@@ -352,6 +367,180 @@ def _line_use_def_gap(line_no: int, loads_on_line: Iterable[str], defs: dict[str
     return best
 
 
+# ---- Cross-function reach helpers ------------------------------------------
+# `use_def_distance` only sees state defined inside the enclosing function.
+# In real code, tangled state usually crosses function boundaries: a module-
+# level global that's mutated in one place and read in another, or a
+# `self.attr` set in `__init__` and read three methods later. These helpers
+# build per-file lookups so lines can score by how far they reach across the
+# file to touch state defined elsewhere.
+
+
+def _global_def_map(tree: ast.AST) -> dict[str, int]:
+    """Return {name -> lineno} for module-level (top-of-file) assignments.
+    Only stmts directly under the Module count — assignments inside a class
+    or function belong to their scope, not to the global namespace."""
+    defs: dict[str, int] = {}
+    if not isinstance(tree, ast.Module):
+        return defs
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    defs.setdefault(target.id, target.lineno)
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            defs.setdefault(stmt.target.id, stmt.target.lineno)
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # Top-level `def`/`class` bind a name too — a line that references
+            # a helper defined at the top of the file "reaches" back to that
+            # def, and this is a common tangled-state pattern (mutually-
+            # recursive helpers, module-level state machines).
+            defs.setdefault(stmt.name, stmt.lineno)
+    return defs
+
+
+def _attr_def_map(tree: ast.AST) -> dict[str, dict[str, int]]:
+    """Return {class_name -> {attr_name -> first_lineno_of_self.attr=<...>}}.
+    We only track assignments to `self.<attr>` inside a class's methods —
+    that's the pattern that produces attribute reach at the class level."""
+    per_class: dict[str, dict[str, int]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        attrs: dict[str, int] = {}
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Assign):
+                for target in sub.targets:
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                    ):
+                        attrs.setdefault(target.attr, target.lineno)
+            elif isinstance(sub, ast.AnnAssign):
+                t = sub.target
+                if (
+                    isinstance(t, ast.Attribute)
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id == "self"
+                ):
+                    attrs.setdefault(t.attr, t.lineno)
+        if attrs:
+            per_class[node.name] = attrs
+    return per_class
+
+
+def _line_to_class_map(tree: ast.AST) -> dict[int, str]:
+    """{lineno -> enclosing class name}. A method inside class Foo scoped
+    self.bar assignments live in Foo's namespace, so we need to know which
+    class a line is inside to look up the right attr map."""
+    out: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            end = node.end_lineno or node.lineno
+            for ln in range(node.lineno, end + 1):
+                out[ln] = node.name
+    return out
+
+
+def _call_graph(tree: ast.AST) -> dict[str, set[str]]:
+    """Return {caller_fn_name -> set(callee_fn_names_defined_in_same_file)}.
+    Only edges to functions that are themselves defined in this file — a
+    call to `open()` or `os.getenv(...)` doesn't contribute (that's what
+    `call_graph_shape` already measures).
+
+    We treat methods as if they lived in a flat namespace: `self.foo()` maps
+    to `foo` if `foo` is defined anywhere in the file. Not perfect (name
+    collisions across classes get merged), but good enough for the
+    approximation this feature is going for."""
+    # Collect every function/method name defined in the file.
+    all_fn_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            all_fn_names.add(node.name)
+
+    graph: dict[str, set[str]] = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        callees: set[str] = set()
+        for sub in ast.walk(fn):
+            if not isinstance(sub, ast.Call):
+                continue
+            func = sub.func
+            called: str | None = None
+            if isinstance(func, ast.Name):
+                called = func.id
+            elif isinstance(func, ast.Attribute):
+                called = func.attr
+            if called and called in all_fn_names and called != fn.name:
+                # Skip self-recursion for the graph — it's a call but not
+                # a step deeper into a different function's code.
+                callees.add(called)
+        graph[fn.name] = callees
+    return graph
+
+
+def _call_depths(graph: dict[str, set[str]], max_depth: int = 4) -> dict[str, int]:
+    """For each function, return the depth of the deepest same-file call chain
+    reachable from its body. Cycle-safe via a per-source-node visited set.
+    Bounded at `max_depth` — anything deeper is just "very deep."""
+    memo: dict[str, int] = {}
+
+    def depth_from(root: str) -> int:
+        # Per-root visited set — same node visited twice from the same root
+        # would be a cycle we don't want to follow further.
+        stack: list[tuple[str, int]] = [(root, 0)]
+        visited: set[str] = {root}
+        best = 0
+        while stack:
+            node, d = stack.pop()
+            if d > best:
+                best = d
+            if d >= max_depth:
+                continue
+            for nxt in graph.get(node, ()):
+                if nxt in visited:
+                    continue
+                visited.add(nxt)
+                stack.append((nxt, d + 1))
+        return best
+
+    for fn_name in graph:
+        memo[fn_name] = depth_from(fn_name)
+    return memo
+
+
+def _line_global_reach(
+    line_no: int,
+    loads_on_line: Iterable[str],
+    globals_map: dict[str, int],
+) -> float:
+    """Max distance to a module-level def of any name referenced on this line."""
+    best = 0.0
+    for name in loads_on_line:
+        d = globals_map.get(name)
+        if d is not None and line_no > d:
+            best = max(best, float(line_no - d))
+    return best
+
+
+def _line_attr_reach(
+    line_no: int,
+    attrs_referenced: Iterable[str],
+    class_attrs: dict[str, int],
+) -> float:
+    """Max distance to a self.attr assignment of any attribute referenced on
+    this line. Class scope only — attrs_referenced should be pre-filtered to
+    the attr names on this line (see the tokenize path in extract_line_features)."""
+    best = 0.0
+    for attr in attrs_referenced:
+        d = class_attrs.get(attr)
+        if d is not None and line_no > d:
+            best = max(best, float(line_no - d))
+    return best
+
+
 def _call_graph_shape(node: ast.AST) -> float:
     """Weighted count of outgoing calls: local calls (unresolved names) count
     2x, library-hint calls count 0.5x. Higher = more delegation to unknowns."""
@@ -384,6 +573,17 @@ def _name_flow(node_or_names: ast.AST | Iterable[str]) -> float:
 # ---- Vector assembly -----------------------------------------------------
 
 def _function_vector(fn: ast.AST) -> list[float]:
+    """Function-level 13-dim vector.
+
+    The three cross-function features (global_reach, attr_reach,
+    call_graph_depth) can only be computed with access to the *whole file*,
+    which this helper doesn't have. When called from `extract_function_features`
+    without that context, they're set to 0.0 — this path is used for STDP
+    training vectors, where the loss of these signals is a known tradeoff
+    (we're already scoring the function in isolation for training purposes).
+    Line-level scoring at inference time has full-file context and gets
+    the real values.
+    """
     idents = _identifiers(fn)
     length = sum(1 for _ in ast.walk(fn))
     return [
@@ -397,6 +597,9 @@ def _function_vector(fn: ast.AST) -> list[float]:
         _call_graph_shape(fn),
         _exception_density(fn),
         0.0,  # parse_error: a function only gets a vector if it parsed at all
+        0.0,  # global_reach: not computable in function-only scope
+        0.0,  # attr_reach: same
+        0.0,  # call_graph_depth: same — needs the whole file's call graph
     ]
 
 
@@ -478,6 +681,7 @@ def _line_scoped_stats(tree: ast.AST) -> tuple[
     dict[int, int],                                 # line -> function's start line
     dict[int, float],                               # per-line LOCAL cyclomatic (branch nodes starting on this line)
     dict[int, float],                               # per-line LOCAL call_graph (call nodes starting on this line)
+    dict[int, str],                                 # line -> enclosing function's name (for call-graph depth lookup)
 ]:
     """Precompute stats indexed by line number.
 
@@ -502,6 +706,7 @@ def _line_scoped_stats(tree: ast.AST) -> tuple[
     scope_stats: dict[int, tuple[float, float]] = {}
     fn_defs: dict[int, dict[str, int]] = {}
     line_to_fn: dict[int, int] = {}
+    line_to_fn_name: dict[int, str] = {}
 
     # Per-line local counts: walk the whole tree once and bucket by lineno.
     line_cx: dict[int, float] = {}
@@ -534,8 +739,22 @@ def _line_scoped_stats(tree: ast.AST) -> tuple[
             for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1):
                 scope_stats[ln] = (nd, ed)
                 line_to_fn[ln] = fn_start
+                line_to_fn_name[ln] = node.name
 
-    return scope_stats, fn_defs, line_to_fn, line_cx, line_cg
+    return scope_stats, fn_defs, line_to_fn, line_cx, line_cg, line_to_fn_name
+
+
+def _line_self_attrs(tree: ast.AST) -> dict[int, set[str]]:
+    """{lineno -> set(self.attr names LOADED on this line)}. Only Load
+    context — a `self.foo = ...` on the line is a def, which is what
+    _attr_def_map already picked up, not a reference back to it."""
+    out: dict[int, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            v = node.value
+            if isinstance(v, ast.Name) and v.id == "self":
+                out.setdefault(node.lineno, set()).add(node.attr)
+    return out
 
 
 def extract_line_features(src: str) -> list[LineFeatures]:
@@ -554,12 +773,26 @@ def extract_line_features(src: str) -> list[LineFeatures]:
     line_to_fn: dict[int, int] = {}
     line_cx: dict[int, float] = {}
     line_cg: dict[int, float] = {}
+    line_to_fn_name: dict[int, str] = {}
     skip_lines: set[int] = set()
     syntax_error_line: int | None = None
+    globals_map: dict[str, int] = {}
+    attr_map: dict[str, dict[str, int]] = {}
+    line_to_class: dict[int, str] = {}
+    call_depths: dict[str, int] = {}
+    line_self_attrs: dict[int, set[str]] = {}
     try:
         tree = ast.parse(src)
-        scope_stats, fn_defs, line_to_fn, line_cx, line_cg = _line_scoped_stats(tree)
+        (scope_stats, fn_defs, line_to_fn, line_cx, line_cg,
+         line_to_fn_name) = _line_scoped_stats(tree)
         skip_lines = _skip_lines(tree)
+        # Cross-function reach lookups. Compute once per file — these are
+        # module-scoped so it would be wasteful to recompute per line.
+        globals_map = _global_def_map(tree)
+        attr_map = _attr_def_map(tree)
+        line_to_class = _line_to_class_map(tree)
+        call_depths = _call_depths(_call_graph(tree))
+        line_self_attrs = _line_self_attrs(tree)
     except SyntaxError as e:
         if lines:
             syntax_error_line = max(1, min(e.lineno or 1, len(lines)))
@@ -589,6 +822,21 @@ def extract_line_features(src: str) -> list[LineFeatures]:
         defs = fn_defs.get(fn_start, {}) if fn_start is not None else {}
         use_def_gap = _line_use_def_gap(i, names, defs)
 
+        # Cross-function reach:
+        # - global_reach: how far back does this line reach into module-level state?
+        # - attr_reach: for methods, how far back into the class's self.attr defs?
+        # - call_graph_depth: for the enclosing function, how deep does its
+        #   same-file call chain go? A cheap proxy for "how much of the file's
+        #   logic does this line potentially execute."
+        global_reach = _line_global_reach(i, names, globals_map)
+        class_name = line_to_class.get(i)
+        attrs_here = line_self_attrs.get(i, set())
+        attr_reach = 0.0
+        if class_name and attrs_here:
+            attr_reach = _line_attr_reach(i, attrs_here, attr_map.get(class_name, {}))
+        fn_name_here = line_to_fn_name.get(i)
+        call_depth = float(call_depths.get(fn_name_here, 0)) if fn_name_here else 0.0
+
         # nesting_depth = 70% local (this line's own indentation) + 30%
         # scope (enclosing function's max nesting). Local dominates so a
         # trivial `return x` at column 0 of a nested function doesn't
@@ -603,12 +851,15 @@ def extract_line_features(src: str) -> list[LineFeatures]:
             float(len(tokens)),
             _shannon(tokens),
             _naming_entropy(names),
-            line_cx.get(i, 0.0),           # LOCAL cyclomatic count (branches starting on this line)
+            line_cx.get(i, 0.0),           # LOCAL cyclomatic count
             use_def_gap,
             _name_flow(names),
-            line_cg.get(i, 0.0),           # LOCAL call-graph weight (calls starting on this line)
+            line_cg.get(i, 0.0),           # LOCAL call-graph weight
             ed_scope,
             1.0 if is_error_line else 0.0,
+            global_reach,                  # NEW: cross-function reach to module state
+            attr_reach,                    # NEW: cross-function reach to class self.attrs
+            call_depth,                    # NEW: depth of same-file call chain from enclosing fn
         ]
         out.append(LineFeatures(line=i, vector=vec))
 
