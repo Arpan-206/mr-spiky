@@ -41,20 +41,21 @@ That's it — no secrets, no configuration. The action uses the default
 
 ## Configuration
 
-The action reads two environment variables (both optional):
-
-- `MRSPIKY_MIN_SCORE` — score threshold for a line to be commented on
-  (default `0.95`). Range `0.0`–`1.0`. Lower = more comments = noisier.
-- `MRSPIKY_MAX_COMMENTS` — hard cap on inline comments per PR (default `5`).
-  Prevents a large refactor PR from generating dozens of comments.
-
-Set them in the workflow if you want different behavior:
+Pass inputs to the reusable workflow via `with:`:
 
 ```yaml
-    env:
-      MRSPIKY_MIN_SCORE: "0.92"
-      MRSPIKY_MAX_COMMENTS: "10"
+jobs:
+  review:
+    uses: Arpan-206/mr-spiky/.github/workflows/mr-spiky-review.yml@main
+    with:
+      min_score: 0.92        # score threshold to flag a line (0.0–1.0)
+      max_comments: 10       # hard cap on inline comments per PR
+      mr_spiky_ref: v0.2.0   # pin to a specific mr-spiky version
 ```
+
+All three inputs are optional. Defaults: `min_score=0.95`, `max_comments=5`,
+`mr_spiky_ref=main`. Lower `min_score` = more comments = noisier. In prod,
+pin `mr_spiky_ref` to a tag so bot behavior is stable.
 
 ## What the bot can and can't detect
 

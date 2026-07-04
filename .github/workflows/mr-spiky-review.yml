@@ -1,29 +1,56 @@
 name: Mr. Spiky code review
 
-# Trigger on any PR against the default branch. `pull_request_target` is
-# intentional — it gives us a GITHUB_TOKEN with write access to post review
-# comments back to the PR. That token cannot see repository *secrets* (safe
-# for forks), so we're only using it to authenticate the review-posting API
-# calls.
-on:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
+# Reusable workflow. Callers reference it like:
+#
+#   jobs:
+#     review:
+#       uses: Arpan-206/mr-spiky/.github/workflows/mr-spiky-review.yml@main
+#       with:
+#         min_score: 0.95
+#         max_comments: 5
+#       permissions:
+#         contents: read
+#         pull-requests: write
+#
+# The caller must trigger on `pull_request_target` (or `pull_request` for
+# same-repo-only PRs). The event context propagates through — this workflow
+# reads `github.event.pull_request.*` from whatever the caller's trigger was.
+#
+# `pull_request_target` in the caller gives us a token with write access to
+# post review comments on PRs from forks. That token cannot see repository
+# *secrets* (safe by design), so we only use it for GitHub API calls.
 
-permissions:
-  contents: read
-  pull-requests: write
+on:
+  workflow_call:
+    inputs:
+      min_score:
+        description: "Score threshold for a line to get an inline comment (0.0–1.0). Higher = fewer comments."
+        required: false
+        type: number
+        default: 0.95
+      max_comments:
+        description: "Hard cap on inline comments per PR. Prevents large refactors from spamming the diff."
+        required: false
+        type: number
+        default: 5
+      mr_spiky_ref:
+        description: "Branch/tag/SHA of Arpan-206/mr-spiky to run. Pin this in prod."
+        required: false
+        type: string
+        default: main
 
 jobs:
   review:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout Mr. Spiky
         uses: actions/checkout@v5
         with:
           repository: Arpan-206/mr-spiky
-          # Pin a version once we publish releases; main is fine while
-          # we're iterating.
-          ref: main
+          ref: ${{ inputs.mr_spiky_ref }}
           path: mr-spiky
 
       - name: Set up Python
@@ -43,26 +70,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p models
           # Latest release with a models.tar.gz asset. If not available yet,
           # the review runs in mock mode (still functional, just uses the
           # linear-scoring fallback).
-          if gh release download --repo Arpan-206/mr-spiky --pattern "models.tar.gz" --dir models/ 2>/dev/null; then
-            tar -xzf models/models.tar.gz -C models/
+          if gh release download --repo Arpan-206/mr-spiky --pattern "models.tar.gz" --dir . 2>/dev/null; then
+            tar -xzvf models.tar.gz
             echo "loaded trained SNN artifacts"
           else
             echo "no release asset found — running in mock mode"
           fi
 
-      - name: Fetch PR diff
+      - name: Fetch PR diff + head checkout
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh pr diff ${{ github.event.pull_request.number }} \
             --repo ${{ github.repository }} \
             > pr.patch
-          # Also mirror the PR checkout (post-merge state) so review.py can
-          # read the full file contents locally.
+          # Mirror the PR head so review.py can read the full file contents.
+          # Use --repo to handle fork PRs correctly.
           gh repo clone ${{ github.event.pull_request.head.repo.full_name }} pr-checkout -- \
             --branch ${{ github.event.pull_request.head.ref }} \
             --depth 1
@@ -73,8 +99,8 @@ jobs:
           uv run python -m src.review \
             --diff ../pr.patch \
             --root ../pr-checkout \
-            --min-score 0.95 \
-            --max-comments 5 \
+            --min-score ${{ inputs.min_score }} \
+            --max-comments ${{ inputs.max_comments }} \
             --format json > ../review.json
           cat ../review.json
 
@@ -95,7 +121,6 @@ jobs:
           pr = os.environ["PR"]
           sha = os.environ["HEAD_SHA"]
 
-          # Build a review payload: inline comments + top-level body.
           payload = {
               "commit_id": sha,
               "event": "COMMENT",
