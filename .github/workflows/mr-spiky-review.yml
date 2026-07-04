@@ -38,6 +38,10 @@ on:
         required: false
         type: string
         default: main
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: "Optional. If set, Claude Haiku rewrites each flag's reason into reviewer voice. Falls back silently to templated reasons when unset or on API failure."
+        required: false
 
 jobs:
   review:
@@ -101,6 +105,11 @@ jobs:
 
       - name: Run Mr. Spiky review
         working-directory: mr-spiky
+        env:
+          # If the caller passed an ANTHROPIC_API_KEY secret, review.py's
+          # rephrase module rewrites each flag's reason via Claude Haiku.
+          # Absent → templated reasons only (no code change needed).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           uv run python -m src.review \
             --diff ../pr.patch \

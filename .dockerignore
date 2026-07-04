@@ -31,3 +31,5 @@ data/*.csv
 data/cache/
 data/hf_cache/
 ~/.cache/huggingface/
+
+.env

@@ -317,6 +317,7 @@ def review(
     min_score: float,
     max_comments: int,
     base_file_contents: dict[str, str] | None = None,
+    use_claude_rephrase: bool = True,
 ) -> dict[str, Any]:
     """Score each file, filter to changed lines, produce inline + summary payloads.
 
@@ -355,6 +356,14 @@ def review(
                 continue
             e = dict(entry)
             e["path"] = path
+            # Stash the actual source-line text so the optional Claude
+            # rephrase has something concrete to anchor on. Guarded because
+            # a line number occasionally overshoots the file length by 1
+            # (analyze() reports on trailing-newline sentinels).
+            src_lines = content.splitlines()
+            line_no = entry["line"]
+            if 0 < line_no <= len(src_lines):
+                e["line_text"] = src_lines[line_no - 1]
             ctx = e.get("context") or {}
             fn = ctx.get("function")
             fn_score = ctx.get("function_score")
@@ -370,6 +379,31 @@ def review(
 
     all_flagged.sort(key=lambda e: -e["score"])
     top = all_flagged[:max_comments]
+
+    # Optional: rewrite each top-N line's `reason` into reviewer voice via
+    # Claude Haiku. Silently falls back to the templated reason if the
+    # ANTHROPIC_API_KEY env var is unset, the SDK is missing, or the call
+    # fails. Only runs on the top N — no point paying for lines we won't
+    # comment on. Preserves the original templated reason under
+    # `raw_reason` in case downstream consumers want it.
+    if use_claude_rephrase and top:
+        from .rephrase import RephraseInput, rephrase_batch
+
+        inputs: list[RephraseInput] = []
+        for entry in top:
+            ctx = entry.get("context") or {}
+            inputs.append({
+                "score": entry.get("score", 0.0),
+                "axes": entry.get("axes", {}),
+                "lineage": ctx.get("lineage") or [],
+                "line_text": entry.get("line_text", ""),
+                "function_name": ctx.get("function"),
+                "fallback": entry.get("reason") or "SNN flagged this line.",
+            })
+        rephrased = rephrase_batch(inputs)
+        for entry, new_reason in zip(top, rephrased):
+            entry["raw_reason"] = entry.get("reason")
+            entry["reason"] = new_reason
 
     # "Functions that got gnarlier" — independent of the flagged-line list.
     # Threshold on the delta so we don't spam every function with a small
@@ -442,6 +476,12 @@ def main() -> int:
     ap.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
     ap.add_argument("--max-comments", type=int, default=DEFAULT_MAX_COMMENTS)
     ap.add_argument(
+        "--no-claude",
+        action="store_true",
+        help="Skip the optional Claude Haiku reason-rephrase step and use the "
+             "templated reasons only. Also implied when ANTHROPIC_API_KEY is unset.",
+    )
+    ap.add_argument(
         "--format",
         choices=("json", "human"),
         default="json",
@@ -478,6 +518,7 @@ def main() -> int:
         changed_lines=changed,
         min_score=args.min_score,
         max_comments=args.max_comments,
+        use_claude_rephrase=not args.no_claude,
         base_file_contents=base_file_contents,
     )
 

@@ -16,3 +16,5 @@ data/*.parquet
 data/*.csv
 data/*.json
 !data/*.py
+
+.env
