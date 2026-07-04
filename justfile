@@ -84,6 +84,39 @@ release-models:
     shasum -a 256 models.tar.gz > models.tar.gz.sha256
     ls -lh models.tar.gz models.tar.gz.sha256
 
+# --- Pitch deck ---
+# Serves the reveal.js deck at :5555 and opens it. `s` in the deck for speaker notes.
+present:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd docs/deck
+    # Python's built-in server is enough — the deck loads reveal.js from a CDN
+    # and only needs to serve the static index.html + style.css + assets/.
+    python3 -m http.server 5555 --bind 127.0.0.1 &
+    PID=$!
+    trap "kill $PID 2>/dev/null" EXIT
+    sleep 0.5
+    open "http://127.0.0.1:5555/" 2>/dev/null || xdg-open "http://127.0.0.1:5555/" 2>/dev/null || true
+    echo "deck served at http://127.0.0.1:5555/  (Ctrl-C to stop)"
+    wait $PID
+
+# Render both Manim clips into docs/deck/assets/. Requires system-python `manim`.
+# The .temp/ pattern applies here — don't run via uv, Manim needs its own env.
+deck-clips:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v manim >/dev/null; then
+        echo "manim not on PATH — install with: pip install manim" >&2
+        exit 1
+    fi
+    cd docs/deck/manim
+    manim -qm lif_membrane_over_lines.py LIFMembraneOverLines
+    manim -qm stdp_learning_rule.py STDPLearningRule
+    # Manim writes to media/videos/<file>/720p30/<Scene>.mp4 by default.
+    cp media/videos/lif_membrane_over_lines/720p30/LIFMembraneOverLines.mp4 ../assets/lif_membrane_over_lines.mp4
+    cp media/videos/stdp_learning_rule/720p30/STDPLearningRule.mp4 ../assets/stdp_learning_rule.mp4
+    echo "rendered → docs/deck/assets/{lif_membrane_over_lines,stdp_learning_rule}.mp4"
+
 # --- Docker ---
 IMAGE := "mrspiky:latest"
 

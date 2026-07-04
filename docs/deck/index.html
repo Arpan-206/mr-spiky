@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mr. Spiky — Intuition Compiler</title>
+
+  <!-- reveal.js core -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css" id="theme">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css">
+
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+
+<!-- ==== SLIDE 1: HOOK — the pitch, one line + real screenshot ==== -->
+<section data-background-color="#0f0f0f">
+  <div class="hook-wrap">
+    <h1 class="hook-title">Mr. Spiky</h1>
+    <p class="hook-sub">an <em>intuition compiler</em> for Python code</p>
+    <p class="hook-punch">
+      A spiking neural network reviewed this pull request.
+    </p>
+    <div class="hook-pr">
+      <!-- Replace with an actual screenshot of testbed PR #4 comment. -->
+      <img src="./assets/testbed-pr4-comment.png"
+           alt="Mr. Spiky's inline comment on testbed PR #4"
+           onerror="this.replaceWith(document.getElementById('pr-screenshot-fallback').content.cloneNode(true))">
+    </div>
+  </div>
+  <template id="pr-screenshot-fallback">
+    <div class="pr-fallback">
+      <div class="pr-fallback-header">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="pr-fallback-title">Arpan-206/mr-spiky-testbed &nbsp;›&nbsp; PR #4 &nbsp;›&nbsp; src/downloader.py</span>
+      </div>
+      <pre class="pr-fallback-body"><strong>Mr. Spiky</strong> — score <code>0.93</code> (top 10% for senior Python code)
+
+This bare <code>except Exception</code> sits three levels deep inside
+a retry loop and swallows all errors without distinguishing between
+transient failures and actual bugs — you're hiding the real problem.
+
+Inside <code>fetch</code> — function-level score <code>0.94</code>
+
+Top axes: <code>exception_surface</code> 1.00,
+<code>complexity</code> 0.93, <code>naming</code> 0.64</pre>
+    </div>
+  </template>
+  <aside class="notes">
+    Open cold. "A senior dev looks at bad code and just knows it's bad.
+    That gut takes years to build. What if we could compile it?"
+    Point at the comment. "That comment was written by a spiking neural
+    network — the same computational model as a biological neuron —
+    reviewing a real pull request." Don't explain more yet.
+  </aside>
+</section>
+
+
+<!-- ==== SLIDE 2: THE PROMPT — Intuition Compiler ==== -->
+<section data-background-color="#0f0f0f">
+  <blockquote class="prompt-quote">
+    Can intuition be translated into something executable?
+  </blockquote>
+  <p class="prompt-source">— hackathon prompt</p>
+
+  <div class="fragment prompt-answer">
+    <p>Senior developers read code and their gut fires <em>fast</em>.</p>
+    <p>Not from rules. From <em>pattern</em>. From having read a lot of code.</p>
+    <p class="claim">
+      What if we trained a brain-inspired network on senior-written code,
+      and let its neurons tell us when yours looks unusual?
+    </p>
+  </div>
+  <aside class="notes">
+    Read the prompt aloud. Beat. Then land the claim. This slide is 20 seconds.
+  </aside>
+</section>
+
+
+<!-- ==== SLIDE 3: THE BIOLOGICAL PREMISE — three mechanisms ==== -->
+<section data-background-color="#0f0f0f">
+  <h2 class="section-h">Three mechanisms. Not a metaphor.</h2>
+  <div class="bio-grid">
+    <div class="bio-card fragment">
+      <h3>1. LIF neurons</h3>
+      <p><strong>Leaky Integrate-and-Fire.</strong> Membrane potential
+      accumulates from inputs, leaks over time, spikes at threshold.</p>
+      <p class="hint">Same abstraction as a biological neuron. Not a metaphor.</p>
+    </div>
+    <div class="bio-card fragment">
+      <h3>2. STDP</h3>
+      <p><strong>Spike-Timing-Dependent Plasticity.</strong> "Neurons
+      that fire together wire together" — weighted by <em>when</em>
+      they fired.</p>
+      <p class="hint">The learning rule your brain uses. Trained the SNN unsupervised.</p>
+    </div>
+    <div class="bio-card fragment">
+      <h3>3. Temporal streaming</h3>
+      <p>The SNN reads your function <strong>line by line</strong>,
+      one line = one timestep. Neuron state carries across lines.</p>
+      <p class="hint">Just like a reviewer whose gut fires at line 47 because of what they read through line 46.</p>
+    </div>
+  </div>
+  <aside class="notes">
+    45-second slide. Advance through the three cards deliberately.
+    The through-line is: LIF gives the neuron a way to CARRY STATE.
+    STDP gives it a way to LEARN without labels.
+    Temporal streaming gives us CONTEXT-AWARE per-line scoring.
+    These three together are what earn the "biological plausibility" claim.
+  </aside>
+</section>
+
+
+<!-- ==== SLIDE 4: MANIM CLIP 1 — LIF membrane over lines ==== -->
+<section data-background-color="#0f0f0f">
+  <h2 class="section-h">A neuron reads your code</h2>
+  <div class="clip-wrap">
+    <video
+      src="./assets/lif_membrane_over_lines.mp4"
+      controls
+      autoplay
+      loop
+      muted
+      playsinline
+      class="clip"
+      onerror="this.replaceWith(document.getElementById('clip1-fallback').content.cloneNode(true))">
+    </video>
+  </div>
+  <template id="clip1-fallback">
+    <div class="clip-fallback">
+      <p>▶ <code>lif_membrane_over_lines.mp4</code></p>
+      <p class="hint">Render with <code>manim -pqm docs/deck/manim/lif_membrane_over_lines.py</code></p>
+    </div>
+  </template>
+  <p class="clip-caption">
+    Membrane potential rises with each line's structural intensity.
+    Threshold crossed → spike. That's the network noticing something.
+  </p>
+  <aside class="notes">
+    Play the clip; narrate it briefly. "Each line the SNN reads bumps
+    the membrane. The membrane also *leaks* between lines — that's the
+    'L' in LIF. Enough structural intensity in one line, it crosses
+    threshold and spikes. That spike is what the API reports as
+    a per-line score."
+  </aside>
+</section>
+
+
+<!-- ==== SLIDE 5: MANIM CLIP 2 — STDP ==== -->
+<section data-background-color="#0f0f0f">
+  <h2 class="section-h">The training rule</h2>
+  <div class="clip-wrap">
+    <video
+      src="./assets/stdp_learning_rule.mp4"
+      controls
+      autoplay
+      loop
+      muted
+      playsinline
+      class="clip"
+      onerror="this.replaceWith(document.getElementById('clip2-fallback').content.cloneNode(true))">
+    </video>
+  </div>
+  <template id="clip2-fallback">
+    <div class="clip-fallback">
+      <p>▶ <code>stdp_learning_rule.mp4</code></p>
+      <p class="hint">Render with <code>manim -pqm docs/deck/manim/stdp_learning_rule.py</code></p>
+    </div>
+  </template>
+  <p class="clip-caption">
+    Fire in the right order → connection strengthens. Wrong order → weakens.
+    <br>Repeat 40,000 times on senior-authored code. That's the whole training.
+  </p>
+  <aside class="notes">
+    "No gradient descent. No labels. No 'good/bad' annotation. Just
+    letting neurons wire themselves according to what firing patterns
+    naturally occur when the network is fed CPython, Django, FastAPI
+    code. When training's done, the weights ARE the shape of senior code."
+  </aside>
+</section>
+
+
+<!-- ==== SLIDE 6: WHAT THE NETWORK OBJECTS TO — six axes ==== -->
+<section data-background-color="#0f0f0f">
+  <h2 class="section-h">Six axes of "gnarly"</h2>
+  <p class="axes-lead">
+    The network reads code as 13 structural features. We collapse its
+    reaction into six human-readable axes on the response:
+  </p>
+  <table class="axes-table">
+    <tr><td><code>complexity</code></td>          <td>deep nesting, branchy control flow</td></tr>
+    <tr><td><code>tangled_state</code></td>       <td>variables reach across long distances</td></tr>
+    <tr><td><code>hidden_calls</code></td>        <td>delegates to opaque calls; chains deep</td></tr>
+    <tr><td><code>exception_surface</code></td>   <td>try/except/raise pressure</td></tr>
+    <tr><td><code>naming</code></td>              <td>unusual identifier density</td></tr>
+    <tr><td><code>malformed</code></td>           <td>doesn't parse — hard override</td></tr>
+  </table>
+  <p class="axes-outro fragment">
+    Every flagged line comes with a breakdown. You know <em>what</em>
+    the network objected to, not just <em>that</em> it objected.
+  </p>
+  <aside class="notes">
+    Move fast here — 30 seconds. Point at malformed: "This is the
+    interesting one. Senior code always parses, so the network has never
+    seen a parse error. That axis force-flags any line ast.parse chokes on.
+    Everything else is emergent from STDP."
+  </aside>
+</section>
+
+
+<!-- ==== SLIDE 7: LIVE DEMO — testbed PRs ==== -->
+<section data-background-color="#0f0f0f">
+  <h2 class="section-h">Live demos — 5 PRs, one per axis</h2>
+  <table class="demo-table">
+    <tr><th>PR</th><th>Junior pattern</th><th>Axis</th><th>Bot did what?</th></tr>
+    <tr>
+      <td><a href="https://github.com/Arpan-206/mr-spiky-testbed/pull/4" target="_blank">#4</a></td>
+      <td>nested try/except pyramid</td>
+      <td><code>exception_surface</code></td>
+      <td class="ok">✓ 4 inline comments, Haiku-rewritten</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/Arpan-206/mr-spiky-testbed/pull/6" target="_blank">#6</a></td>
+      <td>pipeline of 6 opaque hooks</td>
+      <td><code>hidden_calls</code>, <code>naming</code></td>
+      <td class="ok">✓ 3 comments about hook-chain depth</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/Arpan-206/mr-spiky-testbed/pull/7" target="_blank">#7</a></td>
+      <td><code>=</code> instead of <code>==</code></td>
+      <td><code>malformed</code></td>
+      <td class="ok">✓ Force-flagged, score 1.00</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/Arpan-206/mr-spiky-testbed/pull/3" target="_blank">#3</a></td>
+      <td>deeply-nested arrow code</td>
+      <td><code>complexity</code></td>
+      <td class="quiet">— silent (single axis, inside senior distribution)</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/Arpan-206/mr-spiky-testbed/pull/5" target="_blank">#5</a></td>
+      <td>session state on module globals</td>
+      <td><code>tangled_state</code></td>
+      <td class="quiet">— silent (globals-heavy alone doesn't cross)</td>
+    </tr>
+  </table>
+  <p class="demo-footnote fragment">
+    Silent PRs are an <strong>honest</strong> outcome. Single-axis junior
+    code overlaps the senior distribution. Multi-axis gnarl gets caught.
+  </p>
+  <aside class="notes">
+    Open PR #4 in a browser tab BEFORE the presentation.
+    During this slide, alt-tab to it live and scroll through the actual
+    comments. That's the "wow" moment. Then come back.
+    45 seconds on this slide.
+  </aside>
+</section>
+
+
+<!-- ==== SLIDE 8: HONEST VALIDATION ==== -->
+<section data-background-color="#0f0f0f">
+  <h2 class="section-h">Validation — the honest table</h2>
+  <table class="val-table">
+    <tr>
+      <th>Dataset</th><th>n</th><th>Measures</th><th>Balanced acc.</th>
+    </tr>
+    <tr class="win">
+      <td>Pylint refactor family</td><td>258</td>
+      <td>Cross-function structural gnarl</td>
+      <td><strong>77.5%</strong></td>
+    </tr>
+    <tr class="win">
+      <td>Senior annotations (<code># noqa</code>, etc.)</td><td>596</td>
+      <td>Real senior judgments</td>
+      <td><strong>67.4%</strong></td>
+    </tr>
+    <tr class="win">
+      <td>CodeComplex</td><td>4900</td>
+      <td>Algorithmic complexity</td>
+      <td><strong>69.2%</strong></td>
+    </tr>
+    <tr class="honest">
+      <td>PyResBugs</td><td>4000</td>
+      <td>Semantic bugs</td>
+      <td>49.6% <span class="chance">(chance — by design)</span></td>
+    </tr>
+  </table>
+  <p class="val-caption fragment">
+    Structural features <em>cannot</em> see semantic bugs.
+    <br>We report that honestly. This isn't a bug detector.
+    It's an <em>intuition</em> detector.
+  </p>
+  <aside class="notes">
+    "Most projects would bury this row. We put it in the JSON output.
+    Structural AST features cannot distinguish x = y from x == y — the
+    logic is different but the shape is identical. This is a feature,
+    not a bug: we know exactly what our tool is good at and exactly
+    what it isn't."
+    30 seconds. Own it.
+  </aside>
+</section>
+
+
+<!-- ==== SLIDE 9: WHAT YOU CAN DO WITH IT ==== -->
+<section data-background-color="#0f0f0f">
+  <h2 class="section-h">Four product surfaces</h2>
+  <div class="surfaces-grid">
+    <div class="surface fragment">
+      <h3>HTTP API</h3>
+      <pre><code class="language-bash">POST /analyze
+{"code": "...", "language": "python"}</code></pre>
+      <p>Ships as a 350MB Docker image.</p>
+    </div>
+    <div class="surface fragment">
+      <h3>GitHub PR review bot</h3>
+      <pre><code class="language-yaml">uses: Arpan-206/mr-spiky/.github/
+      workflows/mr-spiky-review.yml@main</code></pre>
+      <p>Reusable workflow. Optional Haiku rephrase.</p>
+    </div>
+    <div class="surface fragment">
+      <h3>Whole-repo scan</h3>
+      <pre><code class="language-bash">just repo-review path/to/repo</code></pre>
+      <p>Top-N gnarliest lines across your tree.</p>
+    </div>
+    <div class="surface fragment">
+      <h3>Per-team axis weights</h3>
+      <pre><code class="language-json">{"axis_weights":
+ {"exception_surface": 1.5}}</code></pre>
+      <p>Tune without retraining. Parse errors stay unstoppable.</p>
+    </div>
+  </div>
+  <aside class="notes">
+    Speedrun. 30 seconds total. Don't explain each — just show that
+    the biological-network core has been productized four ways.
+  </aside>
+</section>
+
+
+<!-- ==== SLIDE 10: THE CLOSE ==== -->
+<section data-background-color="#0f0f0f">
+  <h1 class="close-title">Mr. Spiky</h1>
+  <p class="close-tagline">Encoding senior intuition with the same computational primitives your brain uses.</p>
+  <div class="close-links">
+    <div>
+      <div class="close-label">Repo</div>
+      <div><code>github.com/Arpan-206/mr-spiky</code></div>
+    </div>
+    <div>
+      <div class="close-label">Live testbed</div>
+      <div><code>github.com/Arpan-206/mr-spiky-testbed</code></div>
+    </div>
+    <div>
+      <div class="close-label">Docker</div>
+      <div><code>ghcr.io/arpan-206/mr-spiky:latest</code></div>
+    </div>
+  </div>
+  <p class="close-thanks">Thanks. Questions?</p>
+  <aside class="notes">
+    Pause. Let people write down the URLs. Wait for the first question.
+    If nobody speaks up in 5 seconds: "Happy to dive into any layer —
+    the STDP mechanics, the ZCA whitening that broke neuron collapse,
+    or the honest validation methodology."
+  </aside>
+</section>
+
+
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    transition: 'fade',
+    transitionSpeed: 'fast',
+    controls: true,
+    progress: true,
+    center: true,
+    plugins: [ RevealHighlight, RevealNotes ],
+  });
+</script>
+</body>
+</html>
