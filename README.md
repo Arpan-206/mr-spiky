@@ -1,5 +1,9 @@
 # Mr. Spiky — Intuition Compiler
 
+New! Try out the [live demo](https://mr-spiky.crnicholson.com).
+
+---
+
 > Can intuition be translated into something executable?
 > A senior engineer looks at code and instantly knows "this is wrong."
 > Mr. Spiky is a first attempt at encoding that intuition.
